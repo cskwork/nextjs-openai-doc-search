@@ -5,11 +5,16 @@ import { getConfig } from '@/lib/config'
 import { codeBlock, oneLine } from 'common-tags'
 
 export type PageSection = {
+  // Supabase RPC로부터 반환되는 기본 정보
   id?: number
-  path?: string
+  page_id?: number
+  slug?: string
   heading?: string
-  similarity?: number
   content?: string
+  similarity?: number
+
+  // 후처리로 보강되는 필드
+  path?: string
 }
 
 export type UsedSection = {
@@ -30,7 +35,42 @@ export async function matchSectionsForQuery(embedding: number[]) {
     min_content_length: 30,
   })
   if (error) throw error
-  return (data ?? []) as PageSection[]
+
+  const sections = (data ?? []) as PageSection[]
+  const hydrated = await hydrateSectionsWithPagePath(sections)
+  return hydrated
+}
+
+// 한글 주석: 섹션의 page_id를 사용해 실제 페이지 경로(path)를 보강
+async function hydrateSectionsWithPagePath(sections: PageSection[]) {
+  const supabase = getServerSupabaseClient()
+
+  const pageIds = Array.from(
+    new Set(
+      sections
+        .map((s) => s.page_id)
+        .filter((v): v is number => typeof v === 'number')
+    )
+  )
+
+  if (pageIds.length === 0) return sections
+
+  const { data, error } = await supabase
+    .from('nods_page')
+    .select('id, path')
+    .in('id', pageIds)
+
+  if (error || !data) return sections
+
+  const pageIdToPath = new Map<number, string>()
+  for (const row of data as Array<{ id: number; path: string }>) {
+    pageIdToPath.set(row.id, row.path)
+  }
+
+  return sections.map((s) => ({
+    ...s,
+    path: s.path ?? (s.page_id != null ? pageIdToPath.get(s.page_id) : undefined) ?? s.path,
+  }))
 }
 
 export function buildContextFromSections(sections: PageSection[]) {
