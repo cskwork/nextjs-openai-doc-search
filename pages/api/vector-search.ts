@@ -85,6 +85,21 @@ const EMBEDDING_MODEL = process.env.OPENAI_EMBEDDING_MODEL || 'text-embedding-3-
 // @ts-ignore - OpenAI v4 SDK default export is a constructible client
 const openai = new OpenAI({ apiKey: openAiKey })
 
+  // 한글 주석: OpenAI 에러를 간결히 로깅하기 위한 유틸리티
+  function formatOpenAIError(err: unknown): string {
+    const anyErr = err as any
+    const status = anyErr?.status || anyErr?.response?.status
+    const code = anyErr?.code || anyErr?.error?.code
+    const message = anyErr?.message || anyErr?.error?.message || anyErr?.response?.data || ''
+    return [
+      status ? `status=${status}` : '',
+      code ? `code=${code}` : '',
+      message ? `message=${String(message).slice(0, 300)}` : '',
+    ]
+      .filter(Boolean)
+      .join(' ')
+  }
+
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   try {
     // 한글 주석: 요청 및 환경 체크
@@ -169,25 +184,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         model: CHAT_MODEL,
         instructions: intentSystem,
         input: sanitizedQuery,
-        response_format: {
-          type: 'json_schema',
-          json_schema: {
-            name: 'intent_schema',
-            schema: {
-              type: 'object',
-              properties: {
-                intent: {
-                  type: 'string',
-                  enum: ['greeting', 'legal_question', 'smalltalk', 'non_legal', 'other'],
-                },
-                confidence: { type: 'number', minimum: 0, maximum: 1 },
-              },
-              required: ['intent', 'confidence'],
-              additionalProperties: false,
-            },
-            strict: true,
-          },
-        },
       }
       const intentResp = await openai.responses.create(intentParams)
       const rawIntentText = (intentResp as any).output_text ?? ''
@@ -199,7 +195,30 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         console.warn('⚠️ 인텐트 JSON 파싱 실패, 기본값 사용')
       }
     } catch (e) {
-      console.warn('⚠️ 인텐트 분류 실패, 기본값 사용')
+      // 한글 주석: 1차 시도(json_schema) 실패 시, json_object 포맷으로 폴백 시도
+      console.warn('⚠️ 인텐트 분류 1차 실패:', formatOpenAIError(e))
+      try {
+        const fallbackSystem = oneLine`
+          당신은 한국어 법률 상담 도메인의 인텐트 분류기입니다. 사용자의 입력을 다음 중 하나로 분류하세요:
+          "greeting" | "legal_question" | "smalltalk" | "non_legal" | "other".
+          반드시 엄격한 JSON으로만 응답하세요. 형식: {"intent":"...","confidence":0.0~1.0}
+          설명, 추가 텍스트, 코드블록 없이 JSON만 반환하세요.`
+        const fbResp = await openai.responses.create({
+          model: CHAT_MODEL,
+          instructions: fallbackSystem,
+          input: sanitizedQuery,
+        })
+        const fbText = (fbResp as any).output_text ?? ''
+        console.log('🧭 인텐트 폴백 원문 응답:', fbText)
+        const fbParsed = tryParseIntentJson(fbText)
+        if (fbParsed?.intent) classifiedIntent = String(fbParsed.intent)
+        if (typeof fbParsed?.confidence === 'number') classifiedConfidence = fbParsed.confidence
+        if (!fbParsed) {
+          console.warn('⚠️ 인텐트 폴백 JSON 파싱 실패, 기본값 사용')
+        }
+      } catch (e2) {
+        console.warn('⚠️ 인텐트 분류 최종 실패, 기본값 사용:', formatOpenAIError(e2))
+      }
     }
 
     // 인사/스몰톡/비법률 대응은 RAG 생략 후 즉시 응답
