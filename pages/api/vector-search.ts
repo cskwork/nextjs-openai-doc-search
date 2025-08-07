@@ -1,33 +1,95 @@
 import type { NextApiRequest, NextApiResponse } from 'next'
 import { createClient } from '@supabase/supabase-js'
 import { codeBlock, oneLine } from 'common-tags'
-import GPT3Tokenizer from 'gpt3-tokenizer'
+import { encode as encodeTokens } from 'gpt-tokenizer'
 import OpenAI from 'openai'
 import { ApplicationError, UserError } from '@/lib/errors'
+
+// 공용 타입
+type UsedSection = {
+  id: number
+  path: string
+  heading: string
+  similarity: number
+  content_length: number
+  token_count: number
+}
+
+// 응답 헬퍼: 공통 헤더 설정
+function writePlainTextHeaders(res: NextApiResponse) {
+  if (!res.headersSent) {
+    res.writeHead(200, {
+      'Content-Type': 'text/plain; charset=utf-8',
+      'Cache-Control': 'no-cache',
+      Connection: 'keep-alive',
+    })
+  }
+}
+
+// 응답 헬퍼: 인용 주석 전송
+function writeCitations(res: NextApiResponse, sources: UsedSection[], query: string) {
+  const citationData = {
+    type: 'citations',
+    sources,
+    query,
+    timestamp: new Date().toISOString(),
+  }
+  res.write(`<!-- CITATIONS: ${JSON.stringify(citationData)} -->\n`)
+}
+
+// 응답 헬퍼: 단일 텍스트 응답 전송
+function sendTextWithCitations(
+  res: NextApiResponse,
+  body: string,
+  sources: UsedSection[],
+  query: string
+) {
+  // 한글 주석: 텍스트 본문과 인용 메타를 함께 전송
+  writePlainTextHeaders(res)
+  writeCitations(res, sources, query)
+  res.write(body)
+  res.write(`\n\n<!-- END_CITATIONS: ${sources.length} sources used -->`)
+  res.end()
+}
+
+// 유틸: 불리언 파싱 ("true"/true 허용)
+function parseBooleanFlag(value: unknown): boolean {
+  return value === true || value === 'true'
+}
+
+// 유틸: 서버용 Supabase 클라이언트
+function createServerSupabaseClient(url: string, serviceKey: string) {
+  return createClient(url, serviceKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  })
+}
 
 const openAiKey = process.env.OPENAI_KEY
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+
+// 모델 구성: 환경변수로 오버라이드 가능
+const CHAT_MODEL = process.env.OPENAI_CHAT_MODEL || 'gpt-5-mini'
+const MODERATION_MODEL = process.env.OPENAI_MODERATION_MODEL || 'omni-moderation-latest'
+const EMBEDDING_MODEL = process.env.OPENAI_EMBEDDING_MODEL || 'text-embedding-3-small'
 
 // @ts-ignore - OpenAI v4 SDK default export is a constructible client
 const openai = new OpenAI({ apiKey: openAiKey })
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   try {
-    console.log('🚀 Vector search API 호출 시작')
-    console.log('📋 요청 메서드:', req.method)
-    console.log('🔧 환경변수 확인:', {
-      hasOpenAiKey: !!openAiKey,
-      hasSupabaseUrl: !!supabaseUrl,
-      hasSupabaseServiceKey: !!supabaseServiceKey,
-    })
+    // 한글 주석: 요청 및 환경 체크
+    console.log('🚀 Vector search API 호출')
+    if (req.method !== 'POST') {
+      return res.status(405).json({ error: 'Method Not Allowed' })
+    }
 
     if (!openAiKey) {
       throw new ApplicationError('Missing environment variable OPENAI_KEY')
     }
 
     if (!supabaseUrl) {
-      throw new ApplicationError('Missing environment variable SUPABASE_URL')
+      throw new ApplicationError('Missing environment variable NEXT_PUBLIC_SUPABASE_URL')
     }
 
     if (!supabaseServiceKey) {
@@ -35,36 +97,25 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     }
 
     const requestData = req.body
-    console.log('📦 요청 데이터 타입:', typeof requestData)
-    console.log('📦 요청 데이터 존재여부:', !!requestData)
-
     if (!requestData) {
       throw new UserError('Missing request data')
     }
 
     const { prompt: query } = requestData
-    const wantsStream = requestData?.stream === true || requestData?.stream === 'true'
-    console.log('🔍 쿼리 길이:', query?.length || 0)
-    console.log('🔍 쿼리 미리보기:', query?.substring(0, 100))
-    console.log('📡 스트리밍 요청 여부:', wantsStream)
+    const wantsStream = parseBooleanFlag(requestData?.stream)
 
     if (!query) {
       throw new UserError('Missing query in request data')
     }
 
-    const supabaseClient = createClient(supabaseUrl, supabaseServiceKey)
+    const supabaseClient = createServerSupabaseClient(supabaseUrl, supabaseServiceKey)
 
     // Moderate the content to comply with OpenAI T&C
     const sanitizedQuery = query.trim()
-    console.log('🛡️ OpenAI 검열 시작...')
-
     const moderationResponse = await openai.moderations.create({
-      model: 'omni-moderation-latest',
+      model: MODERATION_MODEL,
       input: sanitizedQuery,
     })
-
-    console.log('🛡️ 검열 응답:', moderationResponse)
-    console.log('🛡️ 검열 완료, 결과:', moderationResponse.results?.length > 0 ? 'OK' : 'ERROR')
 
     // Vercel 환경에서 moderationResponse.results가 undefined일 수 있음
     if (
@@ -72,14 +123,12 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       !Array.isArray(moderationResponse.results) ||
       moderationResponse.results.length === 0
     ) {
-      console.log('❌ 검열 응답이 유효하지 않음:', moderationResponse)
       throw new ApplicationError('Invalid moderation response from OpenAI')
     }
 
     const [results] = moderationResponse.results
 
     if (results.flagged) {
-      console.log('🚫 콘텐츠 플래그됨:', results.categories)
       throw new UserError('Flagged content', {
         flagged: true,
         categories: results.categories,
@@ -87,7 +136,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     }
 
     // LLM 기반 인텐트 분류
-    console.log('🧭 인텐트 분류 시작...')
     let classifiedIntent: string = 'legal_question'
     let classifiedConfidence = 0
     const tryParseIntentJson = (text: string) => {
@@ -108,8 +156,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         반드시 엄격한 JSON으로만 응답하세요. 형식: {"intent":"...","confidence":0.0~1.0}
         설명, 추가 텍스트, 코드블록 없이 JSON만 반환하세요.`
       const intentResp = await openai.chat.completions.create({
-        model: 'gpt-5-mini',
-        //temperature: 0,
+        model: CHAT_MODEL,
         messages: [
           { role: 'system', content: intentSystem },
           { role: 'user', content: sanitizedQuery },
@@ -124,10 +171,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         console.warn('⚠️ 인텐트 JSON 파싱 실패, 기본값 사용')
       }
     } catch (e) {
-      console.warn('⚠️ 인텐트 분류 호출 실패, 기본값 사용:', e)
+      console.warn('⚠️ 인텐트 분류 실패, 기본값 사용')
     }
-
-    console.log('🧭 인텐트 분류 결과:', { classifiedIntent, classifiedConfidence })
 
     // 인사/스몰톡/비법률 대응은 RAG 생략 후 즉시 응답
     if (classifiedIntent === 'greeting' || classifiedIntent === 'smalltalk') {
@@ -137,34 +182,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         '- 예: 직장에서 부당한 대우를 받았을 때 어떻게 해야 하나요?\n',
         '- 예: 임대차 계약 만료 후 보증금 반환 절차가 궁금해요.',
       ].join('\n')
-
-      const citationData = {
-        type: 'citations',
-        sources: [],
-        query: sanitizedQuery,
-        timestamp: new Date().toISOString(),
-      }
-
-      if (wantsStream) {
-        res.writeHead(200, {
-          'Content-Type': 'text/plain; charset=utf-8',
-          'Cache-Control': 'no-cache',
-          Connection: 'keep-alive',
-        })
-        res.write(`<!-- CITATIONS: ${JSON.stringify(citationData)} -->\n`)
-        res.write(greetingAnswer)
-        res.write(`\n\n<!-- END_CITATIONS: 0 sources used -->`)
-        return res.end()
-      }
-      res.writeHead(200, {
-        'Content-Type': 'text/plain; charset=utf-8',
-        'Cache-Control': 'no-cache',
-        Connection: 'keep-alive',
-      })
-      res.write(`<!-- CITATIONS: ${JSON.stringify(citationData)} -->\n`)
-      res.write(greetingAnswer)
-      res.write(`\n\n<!-- END_CITATIONS: 0 sources used -->`)
-      return res.end()
+      sendTextWithCitations(res, greetingAnswer, [], sanitizedQuery)
+      return
     }
 
     if (classifiedIntent === 'non_legal' || classifiedIntent === 'other') {
@@ -174,76 +193,24 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         '- 예: 근로계약서에서 연장근로 수당 규정이 없다면 어떻게 되나요?\n',
         '- 예: 전세계약 파기 시 위약금은 어떻게 계산되나요?',
       ].join('\n')
-
-      const citationData = {
-        type: 'citations',
-        sources: [],
-        query: sanitizedQuery,
-        timestamp: new Date().toISOString(),
-      }
-
-      if (wantsStream) {
-        res.writeHead(200, {
-          'Content-Type': 'text/plain; charset=utf-8',
-          'Cache-Control': 'no-cache',
-          Connection: 'keep-alive',
-        })
-        res.write(`<!-- CITATIONS: ${JSON.stringify(citationData)} -->\n`)
-        res.write(guidanceAnswer)
-        res.write(`\n\n<!-- END_CITATIONS: 0 sources used -->`)
-        return res.end()
-      }
-      res.writeHead(200, {
-        'Content-Type': 'text/plain; charset=utf-8',
-        'Cache-Control': 'no-cache',
-        Connection: 'keep-alive',
-      })
-      res.write(`<!-- CITATIONS: ${JSON.stringify(citationData)} -->\n`)
-      res.write(guidanceAnswer)
-      res.write(`\n\n<!-- END_CITATIONS: 0 sources used -->`)
-      return res.end()
+      sendTextWithCitations(res, guidanceAnswer, [], sanitizedQuery)
+      return
     }
 
     // Create embedding from query
-    console.log('🔢 임베딩 생성 시작...')
     const embeddingResponse = await openai.embeddings.create({
-      model: 'text-embedding-3-small',
+      model: EMBEDDING_MODEL,
       input: sanitizedQuery.replaceAll('\n', ' '),
-      dimensions: 1536, // 1536 차원으로 명시적 설정
-    })
-
-    console.log('🔢 임베딩 응답 구조:', {
-      hasData: Array.isArray(embeddingResponse.data),
-      dataLength: embeddingResponse.data?.length,
     })
 
     // Vercel 환경에서 embedding data가 undefined일 수 있음
     if (!embeddingResponse.data || !Array.isArray(embeddingResponse.data) || embeddingResponse.data.length === 0) {
-      console.log('❌ 임베딩 데이터가 유효하지 않음:', embeddingResponse)
       throw new ApplicationError('Invalid embedding response from OpenAI')
     }
 
     const [{ embedding }] = embeddingResponse.data
 
-    console.log('🔢 임베딩 생성 완료, 차원:', embedding?.length || 'unknown')
-
-    console.log('🗄️ Supabase RPC 호출 시작...')
-    
-    // 먼저 테이블에 데이터가 있는지 확인
-    const { data: totalSections, error: countError } = await supabaseClient
-      .from('nods_page_section')
-      .select('id, content, heading', { count: 'exact' })
-      .limit(5)
-    
-    console.log('📊 테이블 데이터 확인:', {
-      hasError: !!countError,
-      sectionsCount: totalSections?.length || 0,
-      firstSection: totalSections?.[0] ? {
-        id: totalSections[0].id,
-        heading: totalSections[0].heading,
-        contentLength: totalSections[0].content?.length || 0
-      } : null
-    })
+    // Supabase RPC 호출
 
     const { error: matchError, data: pageSections } = await supabaseClient.rpc(
       'match_page_sections',
@@ -255,62 +222,30 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       }
     )
 
-    console.log('🗄️ RPC 응답:', {
-      hasError: !!matchError,
-      errorMessage: matchError?.message,
-      pageSectionsType: typeof pageSections,
-      pageSectionsLength: Array.isArray(pageSections) ? pageSections.length : 'N/A',
-      isArray: Array.isArray(pageSections),
-    })
-
     if (matchError) {
-      console.log('❌ Supabase RPC 오류:', matchError)
       throw new ApplicationError('Failed to match page sections', matchError)
     }
 
     // Vercel 환경에서 pageSections가 undefined일 수 있으므로 방어적 처리
     if (!pageSections || !Array.isArray(pageSections)) {
-      console.log('❌ 유효하지 않은 pageSections:', { pageSections, type: typeof pageSections })
       throw new ApplicationError('No matching page sections found')
     }
 
-    console.log('📝 컨텍스트 처리 시작...')
-    const tokenizer = new GPT3Tokenizer({ type: 'gpt3' })
     let tokenCount = 0
     let contextText = ''
-    const usedSections: Array<{
-      id: number;
-      path: string;
-      heading: string;
-      similarity: number;
-      content_length: number;
-      token_count: number;
-    }> = []
+    const usedSections: UsedSection[] = []
 
     for (let i = 0; i < pageSections.length; i++) {
       const pageSection = pageSections[i]
-      console.log(`📄 섹션 ${i} 처리 중:`, {
-        hasSection: !!pageSection,
-        hasContent: !!pageSection?.content,
-        contentType: typeof pageSection?.content,
-        contentLength: pageSection?.content?.length || 0,
-        similarity: pageSection?.similarity,
-        path: pageSection?.path,
-        heading: pageSection?.heading,
-      })
-
       // 섹션 데이터 방어적 체크
       if (!pageSection || !pageSection.content) {
-        console.log(`⚠️ 섹션 ${i} 스킵: 유효하지 않은 데이터`)
         continue
       }
 
       const content = pageSection.content
-      const encoded = tokenizer.encode(content)
-      const sectionTokenCount = encoded.text.length
+      const sectionTokenCount = encodeTokens(content).length
       
       if (tokenCount + sectionTokenCount >= 1500) {
-        console.log('⚠️ 토큰 한도 도달, 섹션 처리 중단:', { 섹션수: i, 토큰수: tokenCount })
         break
       }
 
@@ -326,52 +261,22 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         content_length: content.length,
         token_count: sectionTokenCount,
       })
-      
-      console.log(`✅ 섹션 ${i} 포함됨:`, {
-        id: pageSection.id,
-        path: pageSection.path,
-        heading: pageSection.heading?.substring(0, 50),
-        similarity: pageSection.similarity,
-        tokens: sectionTokenCount,
-      })
     }
-
-    console.log('📝 컨텍스트 처리 완료:', {
-      총섹션수: pageSections.length,
-      처리된섹션수: contextText.split('---').length - 1,
-      최종토큰수: tokenCount,
-      컨텍스트길이: contextText.length,
-    })
-    
-    // 사용된 컨텍스트 소스 상세 로깅
-    console.log('📚 사용된 컨텍스트 소스들:')
-    usedSections.forEach((section, index) => {
-      console.log(`  [${index + 1}] ${section.path} - ${section.heading}`, {
-        similarity: section.similarity.toFixed(4),
-        tokens: section.token_count,
-        content_chars: section.content_length,
-      })
-    })
 
     // 안전한 템플릿 생성을 위한 변수들 확인
     const safeContextText = contextText || ''
     const safeSanitizedQuery = sanitizedQuery || ''
 
-    console.log('📋 프롬프트 생성 준비:', {
-      contextTextLength: safeContextText.length,
-      queryLength: safeSanitizedQuery.length,
-      hasCodeBlock: typeof codeBlock === 'function',
-      hasOneLine: typeof oneLine === 'function',
-    })
-
     const prompt = codeBlock`
       ${oneLine`
-        당신은 대한민국 법률 전문가입니다. 다음 법적 정보만을 바탕으로 질문에 대한 
-        신중하고 정확한 답변을 제공해주세요. 법적 정보에 없는 내용은 만들지 마세요.
-        답변은 한국어로 작성하며, 답변을 제공할 수 없는 경우에는 "제공된 정보로는 
-        정확한 답변을 드리기 어렵습니다. 전문 변호사와 상담하시기를 권합니다."라고 
-        답변해주세요.
+        당신은 대한민국 법률 '정보'를 안내하는 따뜻하고 공감하는 상담사입니다. 아래 '법적 정보' 범위 내에서만 사실에 근거해,
+        쉬운 한국어와 존댓말로 답하세요. 문서에 없는 내용은 절대 추정하거나 만들어내지 않습니다.
       `}
+
+      답변 원칙:
+      - 간결하게 답변하세요.
+      - 어려운 용어는 쉬운 표현으로 풀어 설명
+      - 전문 법률 자문이 필요한 지점은 명확히 표시하고, 변호사 상담을 권유
 
       법적 정보:
       ${safeContextText}
@@ -380,50 +285,24 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       ${safeSanitizedQuery}
       """
 
-      답변 시 다음 사항을 준수해주세요:
-      1. 정확하고 신중한 법적 조언 제공
-      2. 제공된 법적 정보만으로 답변
-      3. 구체적인 사안에 대해서는 전문 변호사 상담 권유
-      
-      답변:
+      만약 제공된 법적 정보만으로 충분히 답하기 어렵다면 다음처럼 말하세요:
+      "제공된 정보로는 정확한 답변을 드리기 어렵습니다. 전문 변호사와 상담하시기를 권합니다."
     `
-
-    console.log('📋 프롬프트 생성 완료, 길이:', prompt?.length || 'unknown')
 
     const chatMessage = {
       role: 'user' as const,
       content: prompt,
     }
 
-    console.log('🤖 GPT 완료 요청 시작...')
     if (wantsStream) {
       const responseStream = await openai.chat.completions.create({
-        model: 'gpt-5-mini',
+        model: CHAT_MODEL,
         messages: [chatMessage],
         stream: true,
       })
-
-      console.log('📡 스트리밍 응답 시작...')
-
       try {
-        // Set headers for SSE with citations
-        res.writeHead(200, {
-          'Content-Type': 'text/plain; charset=utf-8',
-          'Cache-Control': 'no-cache',
-          Connection: 'keep-alive',
-        })
-
-        // Send citation metadata first as a special message
-        const citationData = {
-          type: 'citations',
-          sources: usedSections,
-          query: sanitizedQuery,
-          timestamp: new Date().toISOString(),
-        }
-
-        // Send citation info as a JSON comment that won't affect the stream
-        res.write(`<!-- CITATIONS: ${JSON.stringify(citationData)} -->\n`)
-        console.log('📚 인용 정보 전송 완료:', usedSections.length, '개 소스')
+        writePlainTextHeaders(res)
+        writeCitations(res, usedSections, sanitizedQuery)
 
         // Stream chunks from the official OpenAI SDK
         let chunkCount = 0
@@ -434,7 +313,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
             res.write(delta)
           }
         }
-        console.log('✅ 스트리밍 완료, 총 청크:', chunkCount)
         res.write(`\n\n<!-- END_CITATIONS: ${usedSections.length} sources used -->`)
         res.end()
       } catch (streamErr) {
@@ -447,51 +325,27 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         }
       }
     } else {
-      console.log('🧩 비스트리밍 모드 응답 생성...')
       const completion = await openai.chat.completions.create({
-        model: 'gpt-5-mini',
+        model: CHAT_MODEL,
         messages: [chatMessage],
-        // stream disabled
       })
 
       const answer = completion.choices?.[0]?.message?.content ?? ''
-
-      // Frontend expects plain text with embedded citation comments, not JSON
-      res.writeHead(200, {
-        'Content-Type': 'text/plain; charset=utf-8',
-        'Cache-Control': 'no-cache',
-        Connection: 'keep-alive',
-      })
-
-      const citationData = {
-        type: 'citations',
-        sources: usedSections,
-        query: sanitizedQuery,
-        timestamp: new Date().toISOString(),
-      }
-
-      res.write(`<!-- CITATIONS: ${JSON.stringify(citationData)} -->\n`)
-      res.write(answer)
-      res.write(`\n\n<!-- END_CITATIONS: ${usedSections.length} sources used -->`)
-      res.end()
+      sendTextWithCitations(res, answer, usedSections, sanitizedQuery)
     }
   } catch (err: unknown) {
-    console.log('💥 API 오류 발생:', err)
     if (err instanceof UserError) {
-      console.log('👤 사용자 오류:', err.message, err.data)
       res.status(400).json({
         error: err.message,
         data: err.data,
       })
     } else if (err instanceof ApplicationError) {
-      // Print out application errors with their additional data
-      console.error(`🔧 애플리케이션 오류: ${err.message}: ${JSON.stringify(err.data)}`)
+      // 한글 주석: 애플리케이션 오류 처리
       res.status(500).json({
         error: 'There was an error processing your request',
       })
     } else {
-      // Print out unexpected errors as is to help with debugging
-      console.error('🚨 예상치 못한 오류:', err)
+      console.error('🚨 예상치 못한 서버 오류:', err)
       res.status(500).json({
         error: 'There was an error processing your request',
       })

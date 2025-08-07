@@ -18,9 +18,10 @@ import { inspect } from 'util'
 import yargs from 'yargs'
 
 dotenv.config()
-// OpenAI 클라이언트 초기화
+// OpenAI 클라이언트 및 모델 설정
 // @ts-ignore - OpenAI v4 SDK default export is a constructible client
 const openai = new OpenAI({ apiKey: process.env.OPENAI_KEY })
+const EMBEDDING_MODEL = process.env.OPENAI_EMBEDDING_MODEL || 'text-embedding-3-small'
 
 const ignoredFiles = ['pages/404.mdx']
 
@@ -430,9 +431,8 @@ async function generateEmbeddings() {
 
         try {
           const embeddingResponse = await openai.embeddings.create({
-            model: 'text-embedding-3-small',
+            model: EMBEDDING_MODEL,
             input,
-            dimensions: 1536, // 1536 차원으로 명시적 설정
           })
 
           if (!embeddingResponse.data || embeddingResponse.data.length === 0) {
