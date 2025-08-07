@@ -102,7 +102,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     }
 
     const { prompt: query } = requestData
-    const wantsStream = parseBooleanFlag(requestData?.stream)
+    // 한글 주석: 기본을 스트리밍으로 변경 (클라이언트가 명시적으로 false를 보낼 때만 비스트리밍)
+    const wantsStream = requestData?.stream === false ? false : true
 
     if (!query) {
       throw new UserError('Missing query in request data')
@@ -155,14 +156,12 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         "greeting" | "legal_question" | "smalltalk" | "non_legal" | "other".
         반드시 엄격한 JSON으로만 응답하세요. 형식: {"intent":"...","confidence":0.0~1.0}
         설명, 추가 텍스트, 코드블록 없이 JSON만 반환하세요.`
-      const intentResp = await openai.chat.completions.create({
+      const intentResp = await openai.responses.create({
         model: CHAT_MODEL,
-        messages: [
-          { role: 'system', content: intentSystem },
-          { role: 'user', content: sanitizedQuery },
-        ],
+        instructions: intentSystem,
+        input: sanitizedQuery,
       })
-      const rawIntentText = intentResp.choices?.[0]?.message?.content ?? ''
+      const rawIntentText = (intentResp as any).output_text ?? ''
       console.log('🧭 인텐트 원문 응답:', rawIntentText)
       const parsed = tryParseIntentJson(rawIntentText)
       if (parsed?.intent) classifiedIntent = String(parsed.intent)
@@ -194,14 +193,12 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
           당신은 따뜻하고 공감하는 한국어 상담사입니다. 법률 '외' 주제에 대해 사용자의 질문에 일반 정보 수준으로만 간단히(2~3문장) 답합니다.
           전문적 조언이나 확정적 단정은 피하고, 안전한 범위에서 설명하세요. 말투는 사용자 입력의 톤을 가볍게 반영하되 기본은 존댓말입니다.
           오직 간결한 답변 텍스트만 반환하세요.`
-        const nlResp = await openai.chat.completions.create({
+        const nlResp = await openai.responses.create({
           model: CHAT_MODEL,
-          messages: [
-            { role: 'system', content: nonLegalSystem },
-            { role: 'user', content: sanitizedQuery },
-          ],
+          instructions: nonLegalSystem,
+          input: sanitizedQuery,
         })
-        const shortAnswer = nlResp.choices?.[0]?.message?.content?.trim() ?? ''
+        const shortAnswer = (nlResp as any).output_text?.trim() ?? ''
         const guidanceTail = [
           '',
           '혹시 법적 이슈로 이어질 수 있는 부분이 있다면, 변호사 상담 연결을 도와드릴 수 있어요.',
@@ -323,22 +320,24 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     }
 
     if (wantsStream) {
-      const responseStream = await openai.chat.completions.create({
+      const stream = await openai.responses.create({
         model: CHAT_MODEL,
-        messages: [chatMessage],
+        input: prompt,
         stream: true,
       })
       try {
         writePlainTextHeaders(res)
         writeCitations(res, usedSections, sanitizedQuery)
 
-        // Stream chunks from the official OpenAI SDK
-        let chunkCount = 0
-        for await (const chunk of responseStream) {
-          const delta = chunk.choices?.[0]?.delta?.content
-          if (delta) {
-            chunkCount++
-            res.write(delta)
+        for await (const event of stream as any) {
+          const type = event?.type
+          if (type === 'response.output_text.delta') {
+            const delta = event.delta || ''
+            if (delta) res.write(delta)
+          } else if (type === 'response.error') {
+            console.error('🚨 OpenAI streaming error event:', event)
+          } else if (type === 'response.completed') {
+            break
           }
         }
         res.write(`\n\n<!-- END_CITATIONS: ${usedSections.length} sources used -->`)
@@ -353,12 +352,12 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         }
       }
     } else {
-      const completion = await openai.chat.completions.create({
+      const completion = await openai.responses.create({
         model: CHAT_MODEL,
-        messages: [chatMessage],
+        input: prompt,
       })
 
-      const answer = completion.choices?.[0]?.message?.content ?? ''
+      const answer = (completion as any).output_text ?? ''
       sendTextWithCitations(res, answer, usedSections, sanitizedQuery)
     }
   } catch (err: unknown) {

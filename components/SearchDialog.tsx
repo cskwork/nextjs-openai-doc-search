@@ -35,6 +35,7 @@ const QUICK_QUESTIONS = [
 ]
 
 export function SearchDialog() {
+  const STORAGE_KEY = 'legal-assistant:messages:v1'
   const [messages, setMessages] = React.useState<Message[]>([
     {
       id: '1',
@@ -72,27 +73,116 @@ export function SearchDialog() {
 
   const { complete, completion, isLoading, error } = useCompletion({
     api: '/api/vector-search',
-    onFinish: (prompt, completion) => {
-      // 인용 정보 파싱
-      const { content, citations } = parseCitations(completion)
-      console.log('🔍 파싱된 인용 정보:', citations)
-      
-      // 로딩 메시지 제거 후 완성된 응답으로 교체
+    onFinish: (prompt, finalText) => {
+      // 인용 정보 파싱 (최종 완료 시)
+      const { content, citations } = parseCitations(finalText)
       setMessages((prev) => {
-        const filteredMessages = prev.filter((msg) => !msg.isLoading)
+        const next = [...prev]
+        // 마지막 어시스턴트 메시지를 찾아 최종 내용/인용으로 교체
+        for (let i = next.length - 1; i >= 0; i--) {
+          if (!next[i].isUser) {
+            next[i] = {
+              ...next[i],
+              isLoading: false,
+              content: content,
+              citations,
+              timestamp: new Date(),
+            }
+            return next
+          }
+        }
+        // 방어적: 없을 경우 새로 추가
         return [
-          ...filteredMessages,
+          ...next,
           {
             id: Date.now().toString(),
-            content: content,
+            content,
             isUser: false,
             timestamp: new Date(),
-            citations: citations,
+            citations,
           },
         ]
       })
     },
   })
+
+  // 새로고침 시 채팅 기록 복원
+  React.useEffect(() => {
+    try {
+      const raw = typeof window !== 'undefined' ? localStorage.getItem(STORAGE_KEY) : null
+      if (raw) {
+        const parsed = JSON.parse(raw) as Array<
+          Omit<Message, 'timestamp'> & { timestamp: string | number }
+        >
+        const restored: Message[] = parsed.map((m) => ({
+          ...m,
+          // 문자열/숫자 타임스탬프를 Date로 복원
+          timestamp: new Date(m.timestamp),
+        }))
+        if (restored.length > 0) {
+          setMessages(restored)
+        }
+      }
+    } catch (e) {
+      console.error('채팅 기록 복원 실패:', e)
+    }
+    // 최초 마운트 시 1회만
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // 메시지 변경 시 저장
+  React.useEffect(() => {
+    try {
+      if (typeof window === 'undefined') return
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(messages))
+    } catch (e) {
+      console.error('채팅 기록 저장 실패:', e)
+    }
+  }, [messages])
+
+  // 스트리밍 중간 표시용: CITATIONS 주석 제거
+  const sanitizeStreaming = React.useCallback((text: string) => {
+    return text
+      .replace(/<!-- CITATIONS: [\s\S]*? -->/g, '')
+      .replace(/<!-- END_CITATIONS: [\s\S]*? -->/g, '')
+      .trimStart()
+  }, [])
+
+  // 스트리밍 토큰을 실시간으로 메시지에 반영
+  React.useEffect(() => {
+    if (!completion) return
+    const interim = sanitizeStreaming(completion)
+    if (!interim) return
+    setMessages((prev) => {
+      const next = [...prev]
+      // 가장 마지막 어시스턴트(또는 로딩) 메시지를 업데이트
+      let updated = false
+      for (let i = next.length - 1; i >= 0; i--) {
+        const msg = next[i]
+        if (!msg.isUser) {
+          next[i] = {
+            ...msg,
+            content: interim,
+            isLoading: false,
+            timestamp: new Date(),
+          }
+          updated = true
+          break
+        }
+      }
+      // 방어적: 없다면 하나 생성
+      if (!updated) {
+        next.push({
+          id: Date.now().toString(),
+          content: interim,
+          isUser: false,
+          timestamp: new Date(),
+          isLoading: false,
+        })
+      }
+      return next
+    })
+  }, [completion, sanitizeStreaming])
 
   // 자동 스크롤
   React.useEffect(() => {
