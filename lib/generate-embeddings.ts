@@ -433,8 +433,9 @@ async function generateEmbeddings() {
           const openai = new OpenAIApi(configuration)
 
           const embeddingResponse = await openai.createEmbedding({
-            model: 'text-embedding-ada-002',
+            model: 'text-embedding-3-small',
             input,
+            dimensions: 1536, // 1536 차원으로 명시적 설정
           })
 
           if (embeddingResponse.status !== 200) {

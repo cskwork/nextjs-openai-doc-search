@@ -97,6 +97,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const embeddingResponse = await openai.createEmbedding({
       model: 'text-embedding-3-small',
       input: sanitizedQuery.replaceAll('\n', ' '),
+      dimensions: 1536, // 1536 차원으로 명시적 설정
     })
 
     console.log('🔢 임베딩 응답 상태:', embeddingResponse.status)
@@ -125,13 +126,30 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     console.log('🔢 임베딩 생성 완료, 차원:', embedding?.length || 'unknown')
 
     console.log('🗄️ Supabase RPC 호출 시작...')
+    
+    // 먼저 테이블에 데이터가 있는지 확인
+    const { data: totalSections, error: countError } = await supabaseClient
+      .from('nods_page_section')
+      .select('id, content, heading', { count: 'exact' })
+      .limit(5)
+    
+    console.log('📊 테이블 데이터 확인:', {
+      hasError: !!countError,
+      sectionsCount: totalSections?.length || 0,
+      firstSection: totalSections?.[0] ? {
+        id: totalSections[0].id,
+        heading: totalSections[0].heading,
+        contentLength: totalSections[0].content?.length || 0
+      } : null
+    })
+
     const { error: matchError, data: pageSections } = await supabaseClient.rpc(
       'match_page_sections',
       {
         embedding,
-        match_threshold: 0.78,
+        match_threshold: 0.5, // 임계값을 낮춤 (0.78 → 0.5)
         match_count: 10,
-        min_content_length: 50,
+        min_content_length: 30, // 최소 길이도 낮춤 (50 → 30)
       }
     )
 
@@ -158,6 +176,14 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const tokenizer = new GPT3Tokenizer({ type: 'gpt3' })
     let tokenCount = 0
     let contextText = ''
+    const usedSections: Array<{
+      id: number;
+      path: string;
+      heading: string;
+      similarity: number;
+      content_length: number;
+      token_count: number;
+    }> = []
 
     for (let i = 0; i < pageSections.length; i++) {
       const pageSection = pageSections[i]
@@ -166,6 +192,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         hasContent: !!pageSection?.content,
         contentType: typeof pageSection?.content,
         contentLength: pageSection?.content?.length || 0,
+        similarity: pageSection?.similarity,
+        path: pageSection?.path,
+        heading: pageSection?.heading,
       })
 
       // 섹션 데이터 방어적 체크
@@ -176,14 +205,33 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
       const content = pageSection.content
       const encoded = tokenizer.encode(content)
-      tokenCount += encoded.text.length
-
-      if (tokenCount >= 1500) {
+      const sectionTokenCount = encoded.text.length
+      
+      if (tokenCount + sectionTokenCount >= 1500) {
         console.log('⚠️ 토큰 한도 도달, 섹션 처리 중단:', { 섹션수: i, 토큰수: tokenCount })
         break
       }
 
+      tokenCount += sectionTokenCount
       contextText += `${content.trim()}\n---\n`
+      
+      // 사용된 섹션 메타데이터 저장
+      usedSections.push({
+        id: pageSection.id || i,
+        path: pageSection.path || 'unknown',
+        heading: pageSection.heading || '제목 없음',
+        similarity: pageSection.similarity || 0,
+        content_length: content.length,
+        token_count: sectionTokenCount,
+      })
+      
+      console.log(`✅ 섹션 ${i} 포함됨:`, {
+        id: pageSection.id,
+        path: pageSection.path,
+        heading: pageSection.heading?.substring(0, 50),
+        similarity: pageSection.similarity,
+        tokens: sectionTokenCount,
+      })
     }
 
     console.log('📝 컨텍스트 처리 완료:', {
@@ -191,6 +239,16 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       처리된섹션수: contextText.split('---').length - 1,
       최종토큰수: tokenCount,
       컨텍스트길이: contextText.length,
+    })
+    
+    // 사용된 컨텍스트 소스 상세 로깅
+    console.log('📚 사용된 컨텍스트 소스들:')
+    usedSections.forEach((section, index) => {
+      console.log(`  [${index + 1}] ${section.path} - ${section.heading}`, {
+        similarity: section.similarity.toFixed(4),
+        tokens: section.token_count,
+        content_chars: section.content_length,
+      })
     })
 
     // 안전한 템플릿 생성을 위한 변수들 확인
@@ -206,9 +264,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     const prompt = codeBlock`
       ${oneLine`
-        당신은 대한민국 법률 전문가입니다. 다음 법적 정보를 바탕으로 질문에 대한 
-        신중하고 정확한 답변을 제공해주세요. 답변은 한국어로 작성하며, 마크다운 
-        형식으로 출력해주세요. 답변을 제공할 수 없는 경우에는 "제공된 정보로는 
+        당신은 대한민국 법률 전문가입니다. 다음 법적 정보만을 바탕으로 질문에 대한 
+        신중하고 정확한 답변을 제공해주세요. 법적 정보에 없는 내용은 만들지 마세요.
+        답변은 한국어로 작성하며, 답변을 제공할 수 없는 경우에는 "제공된 정보로는 
         정확한 답변을 드리기 어렵습니다. 전문 변호사와 상담하시기를 권합니다."라고 
         답변해주세요.
       `}
@@ -222,9 +280,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
       답변 시 다음 사항을 준수해주세요:
       1. 정확하고 신중한 법적 조언 제공
-      2. 관련 법령이나 판례가 있다면 언급
+      2. 제공된 법적 정보만으로 답변
       3. 구체적인 사안에 대해서는 전문 변호사 상담 권유
-      4. 면책 조항 포함 (일반적 정보 제공 목적)
       
       답변:
     `
@@ -253,6 +310,26 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     }
 
     console.log('📡 스트리밍 응답 시작...')
+    
+    // Set headers for SSE with citations
+    res.writeHead(200, {
+      'Content-Type': 'text/plain; charset=utf-8',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+    })
+    
+    // Send citation metadata first as a special message
+    const citationData = {
+      type: 'citations',
+      sources: usedSections,
+      query: sanitizedQuery,
+      timestamp: new Date().toISOString(),
+    }
+    
+    // Send citation info as a JSON comment that won't affect the stream
+    res.write(`<!-- CITATIONS: ${JSON.stringify(citationData)} -->\n`)
+    console.log('📚 인용 정보 전송 완료:', usedSections.length, '개 소스')
+    
     // Transform the response into a readable stream
     const stream = OpenAIStream(response)
     const reader = stream.getReader()
@@ -261,6 +338,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       const { done, value } = await reader.read()
       if (done) {
         console.log('✅ 스트리밍 완료, 총 청크:', chunkCount)
+        // Send final citation summary
+        res.write(`\n\n<!-- END_CITATIONS: ${usedSections.length} sources used -->`)
         break
       }
       chunkCount++

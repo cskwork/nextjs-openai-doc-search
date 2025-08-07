@@ -4,7 +4,17 @@ import * as React from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { useCompletion } from 'ai/react'
-import { Loader, User, Frown, Send, Scale, FileText, MessageCircle, Clock } from 'lucide-react'
+import { Loader, User, Frown, Send, Scale, FileText, MessageCircle, Clock, BookOpen, ExternalLink, ChevronDown, ChevronUp } from 'lucide-react'
+
+// 소스 인용 정보 타입 정의
+interface CitationSource {
+  id: number
+  path: string
+  heading: string
+  similarity: number
+  content_length: number
+  token_count: number
+}
 
 // 메시지 타입 정의
 interface Message {
@@ -13,6 +23,7 @@ interface Message {
   isUser: boolean
   timestamp: Date
   isLoading?: boolean
+  citations?: CitationSource[]
 }
 
 // 빠른 질문 템플릿
@@ -34,11 +45,38 @@ export function SearchDialog() {
     },
   ])
   const [query, setQuery] = React.useState<string>('')
+  const [expandedCitations, setExpandedCitations] = React.useState<Record<string, boolean>>({})
   const messagesEndRef = React.useRef<HTMLDivElement>(null)
+  
+  // 인용 정보 파싱 함수
+  const parseCitations = (response: string): { content: string; citations: CitationSource[] } => {
+    const citationMatch = response.match(/<!-- CITATIONS: (.*?) -->/)
+    let citations: CitationSource[] = []
+    let content = response
+    
+    if (citationMatch) {
+      try {
+        const citationData = JSON.parse(citationMatch[1])
+        citations = citationData.sources || []
+        // Remove citation comments from content
+        content = response.replace(/<!-- CITATIONS: .*? -->/g, '')
+                         .replace(/<!-- END_CITATIONS: .*? -->/g, '')
+                         .trim()
+      } catch (error) {
+        console.error('인용 정보 파싱 오류:', error)
+      }
+    }
+    
+    return { content, citations }
+  }
 
   const { complete, completion, isLoading, error } = useCompletion({
     api: '/api/vector-search',
     onFinish: (prompt, completion) => {
+      // 인용 정보 파싱
+      const { content, citations } = parseCitations(completion)
+      console.log('🔍 파싱된 인용 정보:', citations)
+      
       // 로딩 메시지 제거 후 완성된 응답으로 교체
       setMessages((prev) => {
         const filteredMessages = prev.filter((msg) => !msg.isLoading)
@@ -46,9 +84,10 @@ export function SearchDialog() {
           ...filteredMessages,
           {
             id: Date.now().toString(),
-            content: completion,
+            content: content,
             isUser: false,
             timestamp: new Date(),
+            citations: citations,
           },
         ]
       })
@@ -95,6 +134,17 @@ export function SearchDialog() {
       hour: '2-digit',
       minute: '2-digit',
     })
+  }
+  
+  const toggleCitations = (messageId: string) => {
+    setExpandedCitations(prev => ({
+      ...prev,
+      [messageId]: !prev[messageId]
+    }))
+  }
+  
+  const formatSimilarity = (similarity: number) => {
+    return `${(similarity * 100).toFixed(1)}%`
   }
 
   return (
@@ -144,6 +194,59 @@ export function SearchDialog() {
               ) : (
                 <>
                   <p className="text-sm leading-relaxed whitespace-pre-wrap">{message.content}</p>
+                  
+                  {/* 인용 정보 표시 */}
+                  {message.citations && message.citations.length > 0 && (
+                    <div className="mt-3 border-t border-gray-100 pt-3">
+                      <button
+                        onClick={() => toggleCitations(message.id)}
+                        className="flex items-center gap-2 text-xs text-gray-600 hover:text-gray-800 font-medium mb-2"
+                      >
+                        <BookOpen className="w-3 h-3" />
+                        소스 {message.citations.length}개
+                        {expandedCitations[message.id] ? 
+                          <ChevronUp className="w-3 h-3" /> : 
+                          <ChevronDown className="w-3 h-3" />
+                        }
+                      </button>
+                      
+                      {expandedCitations[message.id] && (
+                        <div className="space-y-2">
+                          {message.citations.map((citation, index) => (
+                            <div
+                              key={`${citation.id}-${index}`}
+                              className="bg-gray-50 rounded-lg p-3 border border-gray-200"
+                            >
+                              <div className="flex items-start justify-between gap-2">
+                                <div className="flex-1">
+                                  <div className="flex items-center gap-2 mb-1">
+                                    <span className="text-xs font-semibold text-blue-600">
+                                      #{index + 1}
+                                    </span>
+                                    <h4 className="text-xs font-medium text-gray-800 line-clamp-1">
+                                      {citation.heading}
+                                    </h4>
+                                  </div>
+                                  <p className="text-xs text-gray-600 mb-2">
+                                    {citation.path}
+                                  </p>
+                                  <div className="flex items-center gap-3 text-xs text-gray-500">
+                                    <span className="flex items-center gap-1">
+                                      <ExternalLink className="w-3 h-3" />
+                                      유사도: {formatSimilarity(citation.similarity)}
+                                    </span>
+                                    <span>내용: {citation.content_length}자</span>
+                                    <span>토큰: {citation.token_count}</span>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  
                   <div
                     className={`text-xs mt-2 flex items-center gap-1 ${
                       message.isUser ? 'text-blue-100' : 'text-gray-400'
