@@ -49,6 +49,14 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     }
 
     const { prompt: query } = requestData
+    // 한글 주석: 대화 히스토리 및 최대 길이(개수) 옵션 처리
+    const history = Array.isArray(requestData?.history) ? (requestData.history as Array<{ role: string; content: string }>) : []
+    const historyLimitEnv = Number(process.env.CHAT_HISTORY_LIMIT || process.env.NEXT_PUBLIC_CHAT_HISTORY_LIMIT || 3)
+    const historyLimit = Number.isFinite(historyLimitEnv) && historyLimitEnv > 0 ? historyLimitEnv : 3
+    const historyMax = Number.isFinite(Number(requestData?.historyLimit)) && Number(requestData?.historyLimit) > 0
+      ? Math.min(Number(requestData.historyLimit), 10)
+      : historyLimit
+    const trimmedHistory = history.slice(-historyMax)
     // 한글 주석: 기본을 스트리밍으로 변경 (클라이언트가 명시적으로 false를 보낼 때만 비스트리밍)
     const wantsStream = requestData?.stream === false ? false : true
 
@@ -153,7 +161,14 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     }
 
     const { contextText, usedSections } = buildContextFromSections(pageSections as any)
-    const prompt = buildKoreanLegalPrompt(contextText, sanitizedQuery)
+    // 한글 주석: 히스토리를 압축된 텍스트로 구성
+    const historyText = trimmedHistory
+      .map((m) => {
+        const role = m.role === 'user' ? '사용자' : m.role === 'assistant' ? '어시스턴트' : '시스템'
+        return `- ${role}: ${String(m.content || '').trim()}`
+      })
+      .join('\n')
+    const prompt = buildKoreanLegalPrompt(contextText, sanitizedQuery, historyText)
 
     const chatMessage = {
       role: 'user' as const,

@@ -71,6 +71,11 @@ export function SearchDialog() {
     return { content, citations }
   }
 
+  const historyLimitDefault = React.useMemo(() => {
+    const env = Number(process.env.NEXT_PUBLIC_CHAT_HISTORY_LIMIT || 3)
+    return Number.isFinite(env) && env > 0 ? env : 3
+  }, [])
+
   const { complete, completion, isLoading, error } = useCompletion({
     api: '/api/vector-search',
     onFinish: (prompt: string, finalText: string) => {
@@ -211,7 +216,12 @@ export function SearchDialog() {
     }
 
     setMessages((prev) => [...prev, userMessage, loadingMessage])
-    complete(query)
+    // 한글 주석: 최근 historyLimitDefault개의 메시지를 서버로 전달
+    const history = messages
+      .filter((m) => m.content && !m.isLoading)
+      .map((m) => ({ role: m.isUser ? 'user' : 'assistant', content: m.content }))
+      .slice(-historyLimitDefault)
+    complete(query, { body: { history, historyLimit: historyLimitDefault } })
     setQuery('')
   }
 

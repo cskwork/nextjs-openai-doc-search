@@ -100,9 +100,10 @@ export function buildContextFromSections(sections: PageSection[]) {
   return { contextText, usedSections }
 }
 
-export function buildKoreanLegalPrompt(contextText: string, question: string) {
+export function buildKoreanLegalPrompt(contextText: string, question: string, historyText?: string) {
   const safeContextText = contextText || ''
   const safeQuestion = question || ''
+  const safeHistory = (historyText || '').trim()
   return codeBlock`
     ${oneLine`
       당신은 대한민국 법률 '정보'를 안내하는 따뜻하고 공감하는 상담사입니다. 아래 '법적 정보' 범위 내에서만 사실에 근거해,
@@ -116,6 +117,9 @@ export function buildKoreanLegalPrompt(contextText: string, question: string) {
     - 답변 마지막에 짧은 후속 질문 1개를 포함해 대화를 자연스럽게 이어가기
     - 사용자가 원할 경우 변호사 상담 연결을 정중히 제안하고, 선호 연락 방법(전화/이메일)과 가능 시간을 물어보기
     - 사용자 말투를 가볍게 반영하되, 기본은 존댓말로 공손하게 응답하기
+
+    ${safeHistory ? oneLine`이전 대화(참고): 아래 대화 맥락을 고려하되, 최신 사용자 질문을 우선합니다.` : ''}
+    ${safeHistory ? `\n${safeHistory}\n` : ''}
 
     법적 정보:
     ${safeContextText}
