@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Next.js OpenAI Doc Search Starter - A ChatGPT-style documentation search powered by Next.js, OpenAI, and Supabase. This app processes MDX files to create vector embeddings for semantic search using OpenAI's text-embedding-ada-002 model and pgvector in Supabase.
+Korean Legal Consultation AI Assistant - A ChatGPT-style legal consultation service powered by Next.js, OpenAI, and Supabase. This app processes Korean legal documents (MDX files) to create vector embeddings for semantic search using OpenAI's text-embedding-ada-002 model and pgvector in Supabase. Users can ask legal questions in Korean and get AI-powered responses based on legal documentation.
 
 ## Development Commands
 
@@ -15,10 +15,11 @@ Next.js OpenAI Doc Search Starter - A ChatGPT-style documentation search powered
 - `pnpm start` - Start production server
 - `pnpm lint` - Run ESLint
 - `pnpm format` - Format code with Prettier
+- `npx tsc --noEmit` - Run TypeScript type checking (no test scripts available)
 
 ### Embedding Management
 
-- `pnpm run embeddings` - Generate embeddings for all MDX files in pages/
+- `pnpm run embeddings` - Generate embeddings for all Korean legal MDX files in pages/docs/
 - `pnpm run embeddings:refresh` - Force regenerate all embeddings (ignores checksums)
 
 ### Database Setup
@@ -32,14 +33,15 @@ Next.js OpenAI Doc Search Starter - A ChatGPT-style documentation search powered
 
 ### Two-Phase Processing
 
-1. **Build Time**: MDX files → processed sections → OpenAI embeddings → Supabase storage
-2. **Runtime**: User query → embedding → vector similarity search → GPT response
+1. **Build Time**: Korean legal MDX files → processed sections → OpenAI embeddings → Supabase storage
+2. **Runtime**: Korean user query → embedding → vector similarity search → Korean GPT response with citations
 
 ### Key Components
 
-- **lib/generate-embeddings.ts**: Processes MDX files, creates embeddings, stores in database
-- **pages/api/vector-search.ts**: API endpoint for semantic search and GPT completion
-- **components/SearchDialog.tsx**: Frontend search interface with streaming responses
+- **lib/generate-embeddings.ts**: Processes Korean legal MDX files, creates embeddings, stores in database
+- **pages/api/vector-search.ts**: API endpoint for semantic search and Korean GPT completion with logging
+- **components/SearchDialog.tsx**: Korean legal consultation interface with streaming responses and citation sources
+- **pages/docs/**: Directory containing Korean legal documents (민법총칙.mdx, etc.)
 
 ### Database Schema
 
@@ -55,12 +57,22 @@ Next.js OpenAI Doc Search Starter - A ChatGPT-style documentation search powered
 
 ## Development Notes
 
-### MDX Processing
+### Local Development Setup
 
-- Only processes `.mdx` files in `pages/` directory
+1. Copy environment template: `cp .env.example .env`
+2. Set required environment variables in `.env`
+3. Start Supabase: `supabase start`
+4. Get keys: `supabase status`
+5. Generate embeddings: `pnpm run embeddings`
+6. Start dev server: `pnpm dev`
+
+### Korean Legal Document Processing
+
+- Only processes `.mdx` files in `pages/docs/` directory
+- Supports Korean legal documents (민법총칙.mdx, etc.)
 - Splits content by headings into searchable sections
 - Uses checksums to avoid regenerating unchanged files
-- Ignores files listed in `ignoredFiles` array
+- Ignores files listed in `ignoredFiles` array in lib/generate-embeddings.ts
 
 ### Embedding Strategy
 
@@ -69,8 +81,12 @@ Next.js OpenAI Doc Search Starter - A ChatGPT-style documentation search powered
 - Match threshold of 0.78 for similarity search
 - Minimum content length of 50 characters
 
-### Component Structure
+### UI Features
 
+- Korean language interface with legal consultation focus
+- Quick question templates for common legal queries
+- Citation sources with expandable content display
+- Chat-style conversation history
 - UI components in `components/ui/` using Radix UI primitives
 - Uses Tailwind CSS for styling
 - Search dialog supports keyboard shortcuts (⌘K)

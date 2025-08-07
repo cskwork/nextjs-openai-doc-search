@@ -10,8 +10,7 @@ import { mdxFromMarkdown, MdxjsEsm } from 'mdast-util-mdx'
 import { toMarkdown } from 'mdast-util-to-markdown'
 import { toString } from 'mdast-util-to-string'
 import { mdxjs } from 'micromark-extension-mdxjs'
-import 'openai'
-import { Configuration, OpenAIApi } from 'openai'
+import OpenAI from 'openai'
 import { basename, dirname, join } from 'path'
 import { u } from 'unist-builder'
 import { filter } from 'unist-util-filter'
@@ -19,6 +18,9 @@ import { inspect } from 'util'
 import yargs from 'yargs'
 
 dotenv.config()
+// OpenAI 클라이언트 초기화
+// @ts-ignore - OpenAI v4 SDK default export is a constructible client
+const openai = new OpenAI({ apiKey: process.env.OPENAI_KEY })
 
 const ignoredFiles = ['pages/404.mdx']
 
@@ -427,22 +429,17 @@ async function generateEmbeddings() {
         const input = content.replace(/\n/g, ' ')
 
         try {
-          const configuration = new Configuration({
-            apiKey: process.env.OPENAI_KEY,
-          })
-          const openai = new OpenAIApi(configuration)
-
-          const embeddingResponse = await openai.createEmbedding({
+          const embeddingResponse = await openai.embeddings.create({
             model: 'text-embedding-3-small',
             input,
             dimensions: 1536, // 1536 차원으로 명시적 설정
           })
 
-          if (embeddingResponse.status !== 200) {
-            throw new Error(inspect(embeddingResponse.data, false, 2))
+          if (!embeddingResponse.data || embeddingResponse.data.length === 0) {
+            throw new Error('Empty embedding response')
           }
 
-          const [responseData] = embeddingResponse.data.data
+          const [responseData] = embeddingResponse.data
 
           const { error: insertPageSectionError, data: pageSection } = await supabaseClient
             .from('nods_page_section')
@@ -451,7 +448,7 @@ async function generateEmbeddings() {
               slug,
               heading,
               content,
-              token_count: embeddingResponse.data.usage.total_tokens,
+              token_count: embeddingResponse.usage?.total_tokens ?? null,
               embedding: responseData.embedding,
             })
             .select()

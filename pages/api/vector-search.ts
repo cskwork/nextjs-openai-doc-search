@@ -2,24 +2,15 @@ import type { NextApiRequest, NextApiResponse } from 'next'
 import { createClient } from '@supabase/supabase-js'
 import { codeBlock, oneLine } from 'common-tags'
 import GPT3Tokenizer from 'gpt3-tokenizer'
-import {
-  Configuration,
-  OpenAIApi,
-  CreateModerationResponse,
-  CreateEmbeddingResponse,
-  ChatCompletionRequestMessage,
-} from 'openai-edge'
-import { OpenAIStream, StreamingTextResponse } from 'ai'
+import OpenAI from 'openai'
 import { ApplicationError, UserError } from '@/lib/errors'
 
 const openAiKey = process.env.OPENAI_KEY
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY
 
-const config = new Configuration({
-  apiKey: openAiKey,
-})
-const openai = new OpenAIApi(config)
+// @ts-ignore - OpenAI v4 SDK default export is a constructible client
+const openai = new OpenAI({ apiKey: openAiKey })
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   try {
@@ -52,8 +43,10 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     }
 
     const { prompt: query } = requestData
+    const wantsStream = requestData?.stream === true || requestData?.stream === 'true'
     console.log('🔍 쿼리 길이:', query?.length || 0)
     console.log('🔍 쿼리 미리보기:', query?.substring(0, 100))
+    console.log('📡 스트리밍 요청 여부:', wantsStream)
 
     if (!query) {
       throw new UserError('Missing query in request data')
@@ -65,9 +58,10 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const sanitizedQuery = query.trim()
     console.log('🛡️ OpenAI 검열 시작...')
 
-    const moderationResponse: CreateModerationResponse = await openai
-      .createModeration({ input: sanitizedQuery })
-      .then((res) => res.json())
+    const moderationResponse = await openai.moderations.create({
+      model: 'omni-moderation-latest',
+      input: sanitizedQuery,
+    })
 
     console.log('🛡️ 검열 응답:', moderationResponse)
     console.log('🛡️ 검열 완료, 결과:', moderationResponse.results?.length > 0 ? 'OK' : 'ERROR')
@@ -94,34 +88,24 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     // Create embedding from query
     console.log('🔢 임베딩 생성 시작...')
-    const embeddingResponse = await openai.createEmbedding({
+    const embeddingResponse = await openai.embeddings.create({
       model: 'text-embedding-3-small',
       input: sanitizedQuery.replaceAll('\n', ' '),
       dimensions: 1536, // 1536 차원으로 명시적 설정
     })
 
-    console.log('🔢 임베딩 응답 상태:', embeddingResponse.status)
-    if (embeddingResponse.status !== 200) {
-      throw new ApplicationError('Failed to create embedding for question', embeddingResponse)
-    }
-
-    const embeddingData: CreateEmbeddingResponse = await embeddingResponse.json()
     console.log('🔢 임베딩 응답 구조:', {
-      hasData: !!embeddingData.data,
-      dataLength: embeddingData.data?.length,
+      hasData: Array.isArray(embeddingResponse.data),
+      dataLength: embeddingResponse.data?.length,
     })
 
     // Vercel 환경에서 embedding data가 undefined일 수 있음
-    if (
-      !embeddingData.data ||
-      !Array.isArray(embeddingData.data) ||
-      embeddingData.data.length === 0
-    ) {
-      console.log('❌ 임베딩 데이터가 유효하지 않음:', embeddingData)
+    if (!embeddingResponse.data || !Array.isArray(embeddingResponse.data) || embeddingResponse.data.length === 0) {
+      console.log('❌ 임베딩 데이터가 유효하지 않음:', embeddingResponse)
       throw new ApplicationError('Invalid embedding response from OpenAI')
     }
 
-    const [{ embedding }] = embeddingData.data
+    const [{ embedding }] = embeddingResponse.data
 
     console.log('🔢 임베딩 생성 완료, 차원:', embedding?.length || 'unknown')
 
@@ -288,64 +272,91 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     console.log('📋 프롬프트 생성 완료, 길이:', prompt?.length || 'unknown')
 
-    const chatMessage: ChatCompletionRequestMessage = {
-      role: 'user',
+    const chatMessage = {
+      role: 'user' as const,
       content: prompt,
     }
 
     console.log('🤖 GPT 완료 요청 시작...')
-    const response = await openai.createChatCompletion({
-      model: 'gpt-4.1',
-      messages: [chatMessage],
-      max_tokens: 512,
-      temperature: 0,
-      stream: true,
-    })
+    if (wantsStream) {
+      const responseStream = await openai.chat.completions.create({
+        model: 'gpt-5-mini',
+        messages: [chatMessage],
+        stream: true,
+      })
 
-    console.log('🤖 GPT 응답 상태:', response.status)
-    if (!response.ok) {
-      const error = await response.json()
-      console.log('❌ GPT 완료 실패:', error)
-      throw new ApplicationError('Failed to generate completion', error)
-    }
+      console.log('📡 스트리밍 응답 시작...')
 
-    console.log('📡 스트리밍 응답 시작...')
-    
-    // Set headers for SSE with citations
-    res.writeHead(200, {
-      'Content-Type': 'text/plain; charset=utf-8',
-      'Cache-Control': 'no-cache',
-      'Connection': 'keep-alive',
-    })
-    
-    // Send citation metadata first as a special message
-    const citationData = {
-      type: 'citations',
-      sources: usedSections,
-      query: sanitizedQuery,
-      timestamp: new Date().toISOString(),
-    }
-    
-    // Send citation info as a JSON comment that won't affect the stream
-    res.write(`<!-- CITATIONS: ${JSON.stringify(citationData)} -->\n`)
-    console.log('📚 인용 정보 전송 완료:', usedSections.length, '개 소스')
-    
-    // Transform the response into a readable stream
-    const stream = OpenAIStream(response)
-    const reader = stream.getReader()
-    let chunkCount = 0
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) {
+      try {
+        // Set headers for SSE with citations
+        res.writeHead(200, {
+          'Content-Type': 'text/plain; charset=utf-8',
+          'Cache-Control': 'no-cache',
+          Connection: 'keep-alive',
+        })
+
+        // Send citation metadata first as a special message
+        const citationData = {
+          type: 'citations',
+          sources: usedSections,
+          query: sanitizedQuery,
+          timestamp: new Date().toISOString(),
+        }
+
+        // Send citation info as a JSON comment that won't affect the stream
+        res.write(`<!-- CITATIONS: ${JSON.stringify(citationData)} -->\n`)
+        console.log('📚 인용 정보 전송 완료:', usedSections.length, '개 소스')
+
+        // Stream chunks from the official OpenAI SDK
+        let chunkCount = 0
+        for await (const chunk of responseStream) {
+          const delta = chunk.choices?.[0]?.delta?.content
+          if (delta) {
+            chunkCount++
+            res.write(delta)
+          }
+        }
         console.log('✅ 스트리밍 완료, 총 청크:', chunkCount)
-        // Send final citation summary
         res.write(`\n\n<!-- END_CITATIONS: ${usedSections.length} sources used -->`)
-        break
+        res.end()
+      } catch (streamErr) {
+        console.error('🚨 스트리밍 중 오류 발생:', streamErr)
+        if (!res.headersSent) {
+          res.status(500).json({ error: 'Streaming failed' })
+        } else if (!res.writableEnded) {
+          res.write(`\n\n<!-- STREAM_ERROR: Streaming failed -->`)
+          res.end()
+        }
       }
-      chunkCount++
-      res.write(value)
+    } else {
+      console.log('🧩 비스트리밍 모드 응답 생성...')
+      const completion = await openai.chat.completions.create({
+        model: 'gpt-5-mini',
+        messages: [chatMessage],
+        // stream disabled
+      })
+
+      const answer = completion.choices?.[0]?.message?.content ?? ''
+
+      // Frontend expects plain text with embedded citation comments, not JSON
+      res.writeHead(200, {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Cache-Control': 'no-cache',
+        Connection: 'keep-alive',
+      })
+
+      const citationData = {
+        type: 'citations',
+        sources: usedSections,
+        query: sanitizedQuery,
+        timestamp: new Date().toISOString(),
+      }
+
+      res.write(`<!-- CITATIONS: ${JSON.stringify(citationData)} -->\n`)
+      res.write(answer)
+      res.write(`\n\n<!-- END_CITATIONS: ${usedSections.length} sources used -->`)
+      res.end()
     }
-    res.end()
   } catch (err: unknown) {
     console.log('💥 API 오류 발생:', err)
     if (err instanceof UserError) {
