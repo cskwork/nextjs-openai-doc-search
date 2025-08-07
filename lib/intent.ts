@@ -35,7 +35,7 @@ export async function classifyIntentKorean(text: string): Promise<ClassifiedInte
       반드시 엄격한 JSON으로만 응답하세요. 형식: {"intent":"...","confidence":0.0~1.0}
       설명, 추가 텍스트, 코드블록 없이 JSON만 반환하세요.`
     const resp = await openai.responses.create({
-      model: models.chat,
+      model: models.intent,
       instructions,
       input: text,
     })
@@ -52,7 +52,7 @@ export async function classifyIntentKorean(text: string): Promise<ClassifiedInte
         반드시 엄격한 JSON으로만 응답하세요. 형식: {"intent":"...","confidence":0.0~1.0}
         설명, 추가 텍스트, 코드블록 없이 JSON만 반환하세요.`
       const fbResp = await openai.responses.create({
-        model: models.chat,
+        model: models.intent,
         instructions: fallback,
         input: text,
       })

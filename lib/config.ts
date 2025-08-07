@@ -5,6 +5,8 @@ export type AppConfig = {
   supabaseUrl: string
   supabaseServiceRoleKey: string
   models: {
+    // 한글 주석: 인텐트 전용 모델 (인텐트 분류에만 사용)
+    intent: string
     chat: string
     moderation: string
     embedding: string
@@ -35,6 +37,8 @@ export function getConfig(): AppConfig {
     supabaseUrl,
     supabaseServiceRoleKey,
     models: {
+      // 한글 주석: 인텐트 분류기는 경량 "gpt-5-nano" 기본값 사용
+      intent: process.env.OPENAI_INTENT_MODEL || 'gpt-5-nano',
       // 한글 주석: 기존 기본값을 유지하여 동작 변화 최소화
       chat: process.env.OPENAI_CHAT_MODEL || 'gpt-5-mini',
       moderation: process.env.OPENAI_MODERATION_MODEL || 'omni-moderation-latest',
