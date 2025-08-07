@@ -69,7 +69,15 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       .createModeration({ input: sanitizedQuery })
       .then((res) => res.json())
 
+    console.log('🛡️ 검열 응답:', moderationResponse)
     console.log('🛡️ 검열 완료, 결과:', moderationResponse.results?.length > 0 ? 'OK' : 'ERROR')
+    
+    // Vercel 환경에서 moderationResponse.results가 undefined일 수 있음
+    if (!moderationResponse.results || !Array.isArray(moderationResponse.results) || moderationResponse.results.length === 0) {
+      console.log('❌ 검열 응답이 유효하지 않음:', moderationResponse)
+      throw new ApplicationError('Invalid moderation response from OpenAI')
+    }
+    
     const [results] = moderationResponse.results
 
     if (results.flagged) {
@@ -92,9 +100,16 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       throw new ApplicationError('Failed to create embedding for question', embeddingResponse)
     }
 
-    const {
-      data: [{ embedding }],
-    }: CreateEmbeddingResponse = await embeddingResponse.json()
+    const embeddingData: CreateEmbeddingResponse = await embeddingResponse.json()
+    console.log('🔢 임베딩 응답 구조:', { hasData: !!embeddingData.data, dataLength: embeddingData.data?.length })
+    
+    // Vercel 환경에서 embedding data가 undefined일 수 있음
+    if (!embeddingData.data || !Array.isArray(embeddingData.data) || embeddingData.data.length === 0) {
+      console.log('❌ 임베딩 데이터가 유효하지 않음:', embeddingData)
+      throw new ApplicationError('Invalid embedding response from OpenAI')
+    }
+    
+    const [{ embedding }] = embeddingData.data
     
     console.log('🔢 임베딩 생성 완료, 차원:', embedding?.length || 'unknown')
 
@@ -135,6 +150,19 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     for (let i = 0; i < pageSections.length; i++) {
       const pageSection = pageSections[i]
+      console.log(`📄 섹션 ${i} 처리 중:`, { 
+        hasSection: !!pageSection, 
+        hasContent: !!pageSection?.content,
+        contentType: typeof pageSection?.content,
+        contentLength: pageSection?.content?.length || 0
+      })
+      
+      // 섹션 데이터 방어적 체크
+      if (!pageSection || !pageSection.content) {
+        console.log(`⚠️ 섹션 ${i} 스킵: 유효하지 않은 데이터`)
+        continue
+      }
+      
       const content = pageSection.content
       const encoded = tokenizer.encode(content)
       tokenCount += encoded.text.length
@@ -154,6 +182,17 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       컨텍스트길이: contextText.length 
     })
 
+    // 안전한 템플릿 생성을 위한 변수들 확인
+    const safeContextText = contextText || ''
+    const safeSanitizedQuery = sanitizedQuery || ''
+    
+    console.log('📋 프롬프트 생성 준비:', {
+      contextTextLength: safeContextText.length,
+      queryLength: safeSanitizedQuery.length,
+      hasCodeBlock: typeof codeBlock === 'function',
+      hasOneLine: typeof oneLine === 'function'
+    })
+
     const prompt = codeBlock`
       ${oneLine`
         You are a very enthusiastic Supabase representative who loves
@@ -165,14 +204,16 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       `}
 
       Context sections:
-      ${contextText}
+      ${safeContextText}
 
       Question: """
-      ${sanitizedQuery}
+      ${safeSanitizedQuery}
       """
 
       Answer as markdown (including related code snippets if available):
     `
+    
+    console.log('📋 프롬프트 생성 완료, 길이:', prompt?.length || 'unknown')
 
     const chatMessage: ChatCompletionRequestMessage = {
       role: 'user',
