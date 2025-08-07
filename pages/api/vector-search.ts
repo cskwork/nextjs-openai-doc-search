@@ -86,6 +86,124 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       })
     }
 
+    // LLM 기반 인텐트 분류
+    console.log('🧭 인텐트 분류 시작...')
+    let classifiedIntent: string = 'legal_question'
+    let classifiedConfidence = 0
+    const tryParseIntentJson = (text: string) => {
+      try {
+        return JSON.parse(text)
+      } catch (_) {
+        const m = text.match(/\{[\s\S]*\}/)
+        if (m) {
+          return JSON.parse(m[0])
+        }
+        return null
+      }
+    }
+    try {
+      const intentSystem = oneLine`
+        당신은 한국어 법률 상담 도메인의 인텐트 분류기입니다. 사용자의 입력을 다음 중 하나로 분류하세요:
+        "greeting" | "legal_question" | "smalltalk" | "non_legal" | "other".
+        반드시 엄격한 JSON으로만 응답하세요. 형식: {"intent":"...","confidence":0.0~1.0}
+        설명, 추가 텍스트, 코드블록 없이 JSON만 반환하세요.`
+      const intentResp = await openai.chat.completions.create({
+        model: 'gpt-5-mini',
+        //temperature: 0,
+        messages: [
+          { role: 'system', content: intentSystem },
+          { role: 'user', content: sanitizedQuery },
+        ],
+      })
+      const rawIntentText = intentResp.choices?.[0]?.message?.content ?? ''
+      console.log('🧭 인텐트 원문 응답:', rawIntentText)
+      const parsed = tryParseIntentJson(rawIntentText)
+      if (parsed?.intent) classifiedIntent = String(parsed.intent)
+      if (typeof parsed?.confidence === 'number') classifiedConfidence = parsed.confidence
+      if (!parsed) {
+        console.warn('⚠️ 인텐트 JSON 파싱 실패, 기본값 사용')
+      }
+    } catch (e) {
+      console.warn('⚠️ 인텐트 분류 호출 실패, 기본값 사용:', e)
+    }
+
+    console.log('🧭 인텐트 분류 결과:', { classifiedIntent, classifiedConfidence })
+
+    // 인사/스몰톡/비법률 대응은 RAG 생략 후 즉시 응답
+    if (classifiedIntent === 'greeting' || classifiedIntent === 'smalltalk') {
+      const greetingAnswer = [
+        '안녕하세요! 법무 상담 AI 어시스턴트입니다. 어떤 법적 문의를 도와드릴까요?\n',
+        '- 예: 계약서 작성 시 주의사항은 무엇인가요?\n',
+        '- 예: 직장에서 부당한 대우를 받았을 때 어떻게 해야 하나요?\n',
+        '- 예: 임대차 계약 만료 후 보증금 반환 절차가 궁금해요.',
+      ].join('\n')
+
+      const citationData = {
+        type: 'citations',
+        sources: [],
+        query: sanitizedQuery,
+        timestamp: new Date().toISOString(),
+      }
+
+      if (wantsStream) {
+        res.writeHead(200, {
+          'Content-Type': 'text/plain; charset=utf-8',
+          'Cache-Control': 'no-cache',
+          Connection: 'keep-alive',
+        })
+        res.write(`<!-- CITATIONS: ${JSON.stringify(citationData)} -->\n`)
+        res.write(greetingAnswer)
+        res.write(`\n\n<!-- END_CITATIONS: 0 sources used -->`)
+        return res.end()
+      }
+      res.writeHead(200, {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Cache-Control': 'no-cache',
+        Connection: 'keep-alive',
+      })
+      res.write(`<!-- CITATIONS: ${JSON.stringify(citationData)} -->\n`)
+      res.write(greetingAnswer)
+      res.write(`\n\n<!-- END_CITATIONS: 0 sources used -->`)
+      return res.end()
+    }
+
+    if (classifiedIntent === 'non_legal' || classifiedIntent === 'other') {
+      const guidanceAnswer = [
+        '일반 대화는 가능하지만, 저는 법률 관련 상담에 최적화되어 있어요.\n',
+        '법적 이슈에 대해 구체적으로 질문해 주시면 관련 근거를 바탕으로 도와드릴게요.\n',
+        '- 예: 근로계약서에서 연장근로 수당 규정이 없다면 어떻게 되나요?\n',
+        '- 예: 전세계약 파기 시 위약금은 어떻게 계산되나요?',
+      ].join('\n')
+
+      const citationData = {
+        type: 'citations',
+        sources: [],
+        query: sanitizedQuery,
+        timestamp: new Date().toISOString(),
+      }
+
+      if (wantsStream) {
+        res.writeHead(200, {
+          'Content-Type': 'text/plain; charset=utf-8',
+          'Cache-Control': 'no-cache',
+          Connection: 'keep-alive',
+        })
+        res.write(`<!-- CITATIONS: ${JSON.stringify(citationData)} -->\n`)
+        res.write(guidanceAnswer)
+        res.write(`\n\n<!-- END_CITATIONS: 0 sources used -->`)
+        return res.end()
+      }
+      res.writeHead(200, {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Cache-Control': 'no-cache',
+        Connection: 'keep-alive',
+      })
+      res.write(`<!-- CITATIONS: ${JSON.stringify(citationData)} -->\n`)
+      res.write(guidanceAnswer)
+      res.write(`\n\n<!-- END_CITATIONS: 0 sources used -->`)
+      return res.end()
+    }
+
     // Create embedding from query
     console.log('🔢 임베딩 생성 시작...')
     const embeddingResponse = await openai.embeddings.create({
