@@ -88,6 +88,20 @@ To retrieve `NEXT_PUBLIC_SUPABASE_ANON_KEY` and `SUPABASE_SERVICE_ROLE_KEY` run:
 supabase status
 ```
 
+### Setup Hosted Supabase Database
+
+If you're using a hosted Supabase instance instead of running locally, you'll need to apply the database migrations:
+
+```bash
+# Link your local project to your hosted Supabase project
+supabase link
+
+# Push the database migrations to create required tables
+supabase db push
+```
+
+This will create the necessary `nods_page` and `nods_page_section` tables with pgvector extension in your hosted database.
+
 ### Start the Next.js App
 
 In a new terminal window, run
