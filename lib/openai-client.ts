@@ -1,6 +1,7 @@
 // 한글 주석: OpenAI 클라이언트 초기화 및 공용 유틸
 import OpenAI from 'openai'
 import { getConfig } from '@/lib/config'
+import { maybeWrapOpenAIForTracing } from '@/lib/observability'
 
 let openaiSingleton: OpenAI | null = null
 
@@ -8,7 +9,7 @@ export function getOpenAIClient(): OpenAI {
   if (openaiSingleton) return openaiSingleton
   const { openaiKey } = getConfig()
   // @ts-ignore - OpenAI v4 SDK default export is constructible
-  openaiSingleton = new OpenAI({
+  const client = new OpenAI({
     apiKey: openaiKey,
     // 한글 주석: 지연을 줄이기 위해 타임아웃과 재시도 횟수를 보수적으로 설정
     // 환경변수로 조정 가능 (기본: 30초, 1회 재시도 없음)
@@ -16,6 +17,8 @@ export function getOpenAIClient(): OpenAI {
     timeout: Number(process.env.OPENAI_TIMEOUT_MS || 30000),
     maxRetries: Number(process.env.OPENAI_MAX_RETRIES || 1),
   })
+  // 한글 주석: LangSmith 추적이 활성화된 경우 래핑하여 단일톤 설정
+  openaiSingleton = maybeWrapOpenAIForTracing(client)
   return openaiSingleton
 }
 

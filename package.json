@@ -36,6 +36,7 @@
     "eslint-config-next": "13.2.4",
     "github-slugger": "^2.0.0",
     "gpt-tokenizer": "^3.0.1",
+    "langsmith": "^0.3.54",
     "lucide-react": "^0.128.0",
     "mdast": "^3.0.0",
     "mdast-util-from-markdown": "^1.2.0",
