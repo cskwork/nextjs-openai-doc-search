@@ -28,7 +28,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     console.log('🔧 환경변수 확인:', {
       hasOpenAiKey: !!openAiKey,
       hasSupabaseUrl: !!supabaseUrl,
-      hasSupabaseServiceKey: !!supabaseServiceKey
+      hasSupabaseServiceKey: !!supabaseServiceKey,
     })
 
     if (!openAiKey) {
@@ -64,20 +64,24 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     // Moderate the content to comply with OpenAI T&C
     const sanitizedQuery = query.trim()
     console.log('🛡️ OpenAI 검열 시작...')
-    
+
     const moderationResponse: CreateModerationResponse = await openai
       .createModeration({ input: sanitizedQuery })
       .then((res) => res.json())
 
     console.log('🛡️ 검열 응답:', moderationResponse)
     console.log('🛡️ 검열 완료, 결과:', moderationResponse.results?.length > 0 ? 'OK' : 'ERROR')
-    
+
     // Vercel 환경에서 moderationResponse.results가 undefined일 수 있음
-    if (!moderationResponse.results || !Array.isArray(moderationResponse.results) || moderationResponse.results.length === 0) {
+    if (
+      !moderationResponse.results ||
+      !Array.isArray(moderationResponse.results) ||
+      moderationResponse.results.length === 0
+    ) {
       console.log('❌ 검열 응답이 유효하지 않음:', moderationResponse)
       throw new ApplicationError('Invalid moderation response from OpenAI')
     }
-    
+
     const [results] = moderationResponse.results
 
     if (results.flagged) {
@@ -91,7 +95,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     // Create embedding from query
     console.log('🔢 임베딩 생성 시작...')
     const embeddingResponse = await openai.createEmbedding({
-      model: 'text-embedding-ada-002',
+      model: 'text-embedding-3-small',
       input: sanitizedQuery.replaceAll('\n', ' '),
     })
 
@@ -101,16 +105,23 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     }
 
     const embeddingData: CreateEmbeddingResponse = await embeddingResponse.json()
-    console.log('🔢 임베딩 응답 구조:', { hasData: !!embeddingData.data, dataLength: embeddingData.data?.length })
-    
+    console.log('🔢 임베딩 응답 구조:', {
+      hasData: !!embeddingData.data,
+      dataLength: embeddingData.data?.length,
+    })
+
     // Vercel 환경에서 embedding data가 undefined일 수 있음
-    if (!embeddingData.data || !Array.isArray(embeddingData.data) || embeddingData.data.length === 0) {
+    if (
+      !embeddingData.data ||
+      !Array.isArray(embeddingData.data) ||
+      embeddingData.data.length === 0
+    ) {
       console.log('❌ 임베딩 데이터가 유효하지 않음:', embeddingData)
       throw new ApplicationError('Invalid embedding response from OpenAI')
     }
-    
+
     const [{ embedding }] = embeddingData.data
-    
+
     console.log('🔢 임베딩 생성 완료, 차원:', embedding?.length || 'unknown')
 
     console.log('🗄️ Supabase RPC 호출 시작...')
@@ -129,7 +140,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       errorMessage: matchError?.message,
       pageSectionsType: typeof pageSections,
       pageSectionsLength: Array.isArray(pageSections) ? pageSections.length : 'N/A',
-      isArray: Array.isArray(pageSections)
+      isArray: Array.isArray(pageSections),
     })
 
     if (matchError) {
@@ -150,19 +161,19 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     for (let i = 0; i < pageSections.length; i++) {
       const pageSection = pageSections[i]
-      console.log(`📄 섹션 ${i} 처리 중:`, { 
-        hasSection: !!pageSection, 
+      console.log(`📄 섹션 ${i} 처리 중:`, {
+        hasSection: !!pageSection,
         hasContent: !!pageSection?.content,
         contentType: typeof pageSection?.content,
-        contentLength: pageSection?.content?.length || 0
+        contentLength: pageSection?.content?.length || 0,
       })
-      
+
       // 섹션 데이터 방어적 체크
       if (!pageSection || !pageSection.content) {
         console.log(`⚠️ 섹션 ${i} 스킵: 유효하지 않은 데이터`)
         continue
       }
-      
+
       const content = pageSection.content
       const encoded = tokenizer.encode(content)
       tokenCount += encoded.text.length
@@ -174,45 +185,50 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
       contextText += `${content.trim()}\n---\n`
     }
-    
-    console.log('📝 컨텍스트 처리 완료:', { 
-      총섹션수: pageSections.length, 
+
+    console.log('📝 컨텍스트 처리 완료:', {
+      총섹션수: pageSections.length,
       처리된섹션수: contextText.split('---').length - 1,
       최종토큰수: tokenCount,
-      컨텍스트길이: contextText.length 
+      컨텍스트길이: contextText.length,
     })
 
     // 안전한 템플릿 생성을 위한 변수들 확인
     const safeContextText = contextText || ''
     const safeSanitizedQuery = sanitizedQuery || ''
-    
+
     console.log('📋 프롬프트 생성 준비:', {
       contextTextLength: safeContextText.length,
       queryLength: safeSanitizedQuery.length,
       hasCodeBlock: typeof codeBlock === 'function',
-      hasOneLine: typeof oneLine === 'function'
+      hasOneLine: typeof oneLine === 'function',
     })
 
     const prompt = codeBlock`
       ${oneLine`
-        You are a very enthusiastic Supabase representative who loves
-        to help people! Given the following sections from the Supabase
-        documentation, answer the question using only that information,
-        outputted in markdown format. If you are unsure and the answer
-        is not explicitly written in the documentation, say
-        "Sorry, I don't know how to help with that."
+        당신은 대한민국 법률 전문가입니다. 다음 법적 정보를 바탕으로 질문에 대한 
+        신중하고 정확한 답변을 제공해주세요. 답변은 한국어로 작성하며, 마크다운 
+        형식으로 출력해주세요. 답변을 제공할 수 없는 경우에는 "제공된 정보로는 
+        정확한 답변을 드리기 어렵습니다. 전문 변호사와 상담하시기를 권합니다."라고 
+        답변해주세요.
       `}
 
-      Context sections:
+      법적 정보:
       ${safeContextText}
 
-      Question: """
+      질문: """
       ${safeSanitizedQuery}
       """
 
-      Answer as markdown (including related code snippets if available):
+      답변 시 다음 사항을 준수해주세요:
+      1. 정확하고 신중한 법적 조언 제공
+      2. 관련 법령이나 판례가 있다면 언급
+      3. 구체적인 사안에 대해서는 전문 변호사 상담 권유
+      4. 면책 조항 포함 (일반적 정보 제공 목적)
+      
+      답변:
     `
-    
+
     console.log('📋 프롬프트 생성 완료, 길이:', prompt?.length || 'unknown')
 
     const chatMessage: ChatCompletionRequestMessage = {
@@ -222,7 +238,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     console.log('🤖 GPT 완료 요청 시작...')
     const response = await openai.createChatCompletion({
-      model: 'gpt-3.5-turbo',
+      model: 'gpt-4.1',
       messages: [chatMessage],
       max_tokens: 512,
       temperature: 0,

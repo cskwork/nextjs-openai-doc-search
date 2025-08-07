@@ -128,12 +128,21 @@ type ProcessedMdx = {
 function processMdxForSearch(content: string): ProcessedMdx {
   const checksum = createHash('sha256').update(content).digest('base64')
 
-  const mdxTree = fromMarkdown(content, {
-    extensions: [mdxjs()],
-    mdastExtensions: [mdxFromMarkdown()],
-  })
+  let mdxTree: Root
+  let meta: Meta
 
-  const meta = extractMetaExport(mdxTree)
+  try {
+    mdxTree = fromMarkdown(content, {
+      extensions: [mdxjs()],
+      mdastExtensions: [mdxFromMarkdown()],
+    })
+    meta = extractMetaExport(mdxTree)
+  } catch (error) {
+    // MDX 파싱 실패 시 일반 마크다운으로 처리
+    console.warn('MDX parsing failed, falling back to regular markdown:', error)
+    mdxTree = fromMarkdown(content)
+    meta = undefined
+  }
 
   // Remove all MDX elements from markdown
   const mdTree = filter(
@@ -329,8 +338,8 @@ async function generateEmbeddings() {
 
       // We use checksum to determine if this page & its sections need to be regenerated
       if (!shouldRefresh && existingPage?.checksum === checksum) {
-        const existingParentPage = Array.isArray(existingPage?.parentPage) 
-          ? existingPage.parentPage[0] 
+        const existingParentPage = Array.isArray(existingPage?.parentPage)
+          ? existingPage.parentPage[0]
           : existingPage?.parentPage
 
         // If parent page changed, update it
