@@ -15,7 +15,8 @@ import { basename, dirname, join } from 'path'
 import { u } from 'unist-builder'
 import { filter } from 'unist-util-filter'
 import { inspect } from 'util'
-import yargs from 'yargs'
+import yargs from 'yargs/yargs'
+import { hideBin } from 'yargs/helpers'
 
 dotenv.config()
 // OpenAI 클라이언트 및 모델 설정
@@ -277,11 +278,13 @@ class MarkdownEmbeddingSource extends BaseEmbeddingSource {
 type EmbeddingSource = MarkdownEmbeddingSource
 
 async function generateEmbeddings() {
-  const argv = await yargs.option('refresh', {
-    alias: 'r',
-    description: 'Refresh data',
-    type: 'boolean',
-  }).argv
+  const argv = await yargs(hideBin(process.argv))
+    .option('refresh', {
+      alias: 'r',
+      description: 'Refresh data',
+      type: 'boolean',
+    })
+    .parseAsync()
 
   const shouldRefresh = argv.refresh
 

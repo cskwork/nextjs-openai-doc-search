@@ -1,4 +1,5 @@
 import type { NextApiRequest, NextApiResponse } from 'next'
+import { once } from 'events'
 import { createClient } from '@supabase/supabase-js'
 import { codeBlock, oneLine } from 'common-tags'
 import { encode as encodeTokens } from 'gpt-tokenizer'
@@ -35,6 +36,14 @@ function writeCitations(res: NextApiResponse, sources: UsedSection[], query: str
     timestamp: new Date().toISOString(),
   }
   res.write(`<!-- CITATIONS: ${JSON.stringify(citationData)} -->\n`)
+}
+
+// 응답 헬퍼: 백프레셔 안전 쓰기
+async function writeWithBackpressure(res: NextApiResponse, chunk: string) {
+  const ok = res.write(chunk)
+  if (!ok) {
+    await once(res, 'drain')
+  }
 }
 
 // 응답 헬퍼: 단일 텍스트 응답 전송
@@ -156,11 +165,31 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         "greeting" | "legal_question" | "smalltalk" | "non_legal" | "other".
         반드시 엄격한 JSON으로만 응답하세요. 형식: {"intent":"...","confidence":0.0~1.0}
         설명, 추가 텍스트, 코드블록 없이 JSON만 반환하세요.`
-      const intentResp = await openai.responses.create({
+      const intentParams: any = {
         model: CHAT_MODEL,
         instructions: intentSystem,
         input: sanitizedQuery,
-      })
+        response_format: {
+          type: 'json_schema',
+          json_schema: {
+            name: 'intent_schema',
+            schema: {
+              type: 'object',
+              properties: {
+                intent: {
+                  type: 'string',
+                  enum: ['greeting', 'legal_question', 'smalltalk', 'non_legal', 'other'],
+                },
+                confidence: { type: 'number', minimum: 0, maximum: 1 },
+              },
+              required: ['intent', 'confidence'],
+              additionalProperties: false,
+            },
+            strict: true,
+          },
+        },
+      }
+      const intentResp = await openai.responses.create(intentParams)
       const rawIntentText = (intentResp as any).output_text ?? ''
       console.log('🧭 인텐트 원문 응답:', rawIntentText)
       const parsed = tryParseIntentJson(rawIntentText)
@@ -320,25 +349,50 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     }
 
     if (wantsStream) {
-      const stream = await openai.responses.create({
-        model: CHAT_MODEL,
-        input: prompt,
-        stream: true,
-      })
+      const controller = new AbortController()
+      let aborted = false
+      const onClose = () => {
+        aborted = true
+        controller.abort()
+      }
+      res.on('close', onClose)
+
+      const stream = await openai.responses.create(
+        {
+          model: CHAT_MODEL,
+          input: prompt,
+          stream: true,
+        },
+        { signal: controller.signal as any }
+      )
       try {
         writePlainTextHeaders(res)
         writeCitations(res, usedSections, sanitizedQuery)
 
+        // 메타데이터 추적
+        let responseId: string | undefined
+        let modelId: string | undefined
+        let usage: any | undefined
+
         for await (const event of stream as any) {
           const type = event?.type
-          if (type === 'response.output_text.delta') {
+          if (type === 'response.created') {
+            responseId = event?.response?.id ?? event?.data?.id ?? responseId
+            modelId = event?.response?.model ?? event?.data?.model ?? modelId
+          } else if (type === 'response.output_text.delta') {
             const delta = event.delta || ''
-            if (delta) res.write(delta)
+            if (delta) await writeWithBackpressure(res, delta)
+          } else if (type === 'response.completed') {
+            // 완료 시점의 메타 수집 시도
+            const r = event?.response ?? event?.data
+            responseId = r?.id ?? responseId
+            modelId = r?.model ?? modelId
+            usage = r?.usage ?? usage
+            break
           } else if (type === 'response.error') {
             console.error('🚨 OpenAI streaming error event:', event)
-          } else if (type === 'response.completed') {
-            break
           }
+          if (aborted) break
         }
         res.write(`\n\n<!-- END_CITATIONS: ${usedSections.length} sources used -->`)
         res.end()
@@ -350,6 +404,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
           res.write(`\n\n<!-- STREAM_ERROR: Streaming failed -->`)
           res.end()
         }
+      } finally {
+        res.off('close', onClose)
       }
     } else {
       const completion = await openai.responses.create({

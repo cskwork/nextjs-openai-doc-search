@@ -73,7 +73,7 @@ export function SearchDialog() {
 
   const { complete, completion, isLoading, error } = useCompletion({
     api: '/api/vector-search',
-    onFinish: (prompt, finalText) => {
+    onFinish: (prompt: string, finalText: string) => {
       // 인용 정보 파싱 (최종 완료 시)
       const { content, citations } = parseCitations(finalText)
       setMessages((prev) => {
