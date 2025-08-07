@@ -1,4 +1,3 @@
-import { createClient } from '@supabase/supabase-js'
 import { createHash } from 'crypto'
 import dotenv from 'dotenv'
 import { ObjectExpression } from 'estree'
@@ -10,19 +9,20 @@ import { mdxFromMarkdown, MdxjsEsm } from 'mdast-util-mdx'
 import { toMarkdown } from 'mdast-util-to-markdown'
 import { toString } from 'mdast-util-to-string'
 import { mdxjs } from 'micromark-extension-mdxjs'
-import OpenAI from 'openai'
 import { basename, dirname, join } from 'path'
 import { u } from 'unist-builder'
 import { filter } from 'unist-util-filter'
 import { inspect } from 'util'
 import yargs from 'yargs/yargs'
 import { hideBin } from 'yargs/helpers'
+import { getOpenAIClient } from '@/lib/openai-client'
+import { getConfig } from '@/lib/config'
+import { getServerSupabaseClient } from '@/lib/supabase-server'
 
 dotenv.config()
-// OpenAI 클라이언트 및 모델 설정
-// @ts-ignore - OpenAI v4 SDK default export is a constructible client
-const openai = new OpenAI({ apiKey: process.env.OPENAI_KEY })
-const EMBEDDING_MODEL = process.env.OPENAI_EMBEDDING_MODEL || 'text-embedding-3-small'
+// OpenAI 클라이언트 및 모델 설정(공용 모듈 사용)
+const openai = getOpenAIClient()
+const { models } = getConfig()
 
 const ignoredFiles = ['pages/404.mdx']
 
@@ -298,16 +298,7 @@ async function generateEmbeddings() {
     )
   }
 
-  const supabaseClient = createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL,
-    process.env.SUPABASE_SERVICE_ROLE_KEY,
-    {
-      auth: {
-        persistSession: false,
-        autoRefreshToken: false,
-      },
-    }
-  )
+  const supabaseClient = getServerSupabaseClient()
 
   const embeddingSources: EmbeddingSource[] = [
     ...(await walk('pages'))
@@ -434,7 +425,7 @@ async function generateEmbeddings() {
 
         try {
           const embeddingResponse = await openai.embeddings.create({
-            model: EMBEDDING_MODEL,
+            model: models.embedding,
             input,
           })
 

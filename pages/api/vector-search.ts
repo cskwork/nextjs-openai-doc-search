@@ -1,104 +1,35 @@
 import type { NextApiRequest, NextApiResponse } from 'next'
-import { once } from 'events'
-import { createClient } from '@supabase/supabase-js'
-import { codeBlock, oneLine } from 'common-tags'
-import { encode as encodeTokens } from 'gpt-tokenizer'
-import OpenAI from 'openai'
+import { oneLine } from 'common-tags'
 import { ApplicationError, UserError } from '@/lib/errors'
+import { getConfig } from '@/lib/config'
+import { getOpenAIClient, formatOpenAIError } from '@/lib/openai-client'
+import { getServerSupabaseClient } from '@/lib/supabase-server'
+import { writePlainTextHeaders, writeCitations, writeWithBackpressure, sendTextWithCitations } from '@/lib/http'
+import { classifyIntentKorean } from '@/lib/intent'
+import { matchSectionsForQuery, buildContextFromSections, buildKoreanLegalPrompt } from '@/lib/rag'
 
 // 공용 타입
-type UsedSection = {
-  id: number
-  path: string
-  heading: string
-  similarity: number
-  content_length: number
-  token_count: number
-}
+// 한글 주석: 로컬 타입 제거(공용 모듈의 타입 사용)
 
 // 응답 헬퍼: 공통 헤더 설정
-function writePlainTextHeaders(res: NextApiResponse) {
-  if (!res.headersSent) {
-    res.writeHead(200, {
-      'Content-Type': 'text/plain; charset=utf-8',
-      'Cache-Control': 'no-cache',
-      Connection: 'keep-alive',
-    })
-  }
-}
+// 헤더/쓰기 유틸은 '@/lib/http' 사용
 
 // 응답 헬퍼: 인용 주석 전송
-function writeCitations(res: NextApiResponse, sources: UsedSection[], query: string) {
-  const citationData = {
-    type: 'citations',
-    sources,
-    query,
-    timestamp: new Date().toISOString(),
-  }
-  res.write(`<!-- CITATIONS: ${JSON.stringify(citationData)} -->\n`)
-}
+// 인용 유틸은 '@/lib/http' 사용
 
 // 응답 헬퍼: 백프레셔 안전 쓰기
-async function writeWithBackpressure(res: NextApiResponse, chunk: string) {
-  const ok = res.write(chunk)
-  if (!ok) {
-    await once(res, 'drain')
-  }
-}
+// 백프레셔 유틸은 '@/lib/http' 사용
 
 // 응답 헬퍼: 단일 텍스트 응답 전송
-function sendTextWithCitations(
-  res: NextApiResponse,
-  body: string,
-  sources: UsedSection[],
-  query: string
-) {
-  // 한글 주석: 텍스트 본문과 인용 메타를 함께 전송
-  writePlainTextHeaders(res)
-  writeCitations(res, sources, query)
-  res.write(body)
-  res.write(`\n\n<!-- END_CITATIONS: ${sources.length} sources used -->`)
-  res.end()
-}
+// 텍스트 전송 유틸은 '@/lib/http' 사용
 
 // 유틸: 불리언 파싱 ("true"/true 허용)
-function parseBooleanFlag(value: unknown): boolean {
-  return value === true || value === 'true'
-}
+// 불리언 파싱 유틸은 '@/lib/http' 사용
 
 // 유틸: 서버용 Supabase 클라이언트
-function createServerSupabaseClient(url: string, serviceKey: string) {
-  return createClient(url, serviceKey, {
-    auth: { persistSession: false, autoRefreshToken: false },
-  })
-}
+// Supabase 클라이언트는 '@/lib/supabase-server' 사용
 
-const openAiKey = process.env.OPENAI_KEY
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
-const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY
-
-// 모델 구성: 환경변수로 오버라이드 가능
-const CHAT_MODEL = process.env.OPENAI_CHAT_MODEL || 'gpt-5-mini'
-const MODERATION_MODEL = process.env.OPENAI_MODERATION_MODEL || 'omni-moderation-latest'
-const EMBEDDING_MODEL = process.env.OPENAI_EMBEDDING_MODEL || 'text-embedding-3-small'
-
-// @ts-ignore - OpenAI v4 SDK default export is a constructible client
-const openai = new OpenAI({ apiKey: openAiKey })
-
-  // 한글 주석: OpenAI 에러를 간결히 로깅하기 위한 유틸리티
-  function formatOpenAIError(err: unknown): string {
-    const anyErr = err as any
-    const status = anyErr?.status || anyErr?.response?.status
-    const code = anyErr?.code || anyErr?.error?.code
-    const message = anyErr?.message || anyErr?.error?.message || anyErr?.response?.data || ''
-    return [
-      status ? `status=${status}` : '',
-      code ? `code=${code}` : '',
-      message ? `message=${String(message).slice(0, 300)}` : '',
-    ]
-      .filter(Boolean)
-      .join(' ')
-  }
+// 한글 주석: 빌드 시 환경변수 의존을 피하기 위해 런타임에 초기화
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   try {
@@ -108,17 +39,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return res.status(405).json({ error: 'Method Not Allowed' })
     }
 
-    if (!openAiKey) {
-      throw new ApplicationError('Missing environment variable OPENAI_KEY')
-    }
-
-    if (!supabaseUrl) {
-      throw new ApplicationError('Missing environment variable NEXT_PUBLIC_SUPABASE_URL')
-    }
-
-    if (!supabaseServiceKey) {
-      throw new ApplicationError('Missing environment variable SUPABASE_SERVICE_ROLE_KEY')
-    }
+    // 한글 주석: 구성 로딩(유효성은 getConfig에서 보장) 및 OpenAI 클라이언트 초기화
+    const { models } = getConfig()
+    const openai = getOpenAIClient()
 
     const requestData = req.body
     if (!requestData) {
@@ -133,12 +56,12 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       throw new UserError('Missing query in request data')
     }
 
-    const supabaseClient = createServerSupabaseClient(supabaseUrl, supabaseServiceKey)
+    const supabaseClient = getServerSupabaseClient()
 
     // Moderate the content to comply with OpenAI T&C
     const sanitizedQuery = query.trim()
     const moderationResponse = await openai.moderations.create({
-      model: MODERATION_MODEL,
+      model: models.moderation,
       input: sanitizedQuery,
     })
 
@@ -161,65 +84,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     }
 
     // LLM 기반 인텐트 분류
-    let classifiedIntent: string = 'legal_question'
-    let classifiedConfidence = 0
-    const tryParseIntentJson = (text: string) => {
-      try {
-        return JSON.parse(text)
-      } catch (_) {
-        const m = text.match(/\{[\s\S]*\}/)
-        if (m) {
-          return JSON.parse(m[0])
-        }
-        return null
-      }
-    }
-    try {
-      const intentSystem = oneLine`
-        당신은 한국어 법률 상담 도메인의 인텐트 분류기입니다. 사용자의 입력을 다음 중 하나로 분류하세요:
-        "greeting" | "legal_question" | "smalltalk" | "non_legal" | "other".
-        반드시 엄격한 JSON으로만 응답하세요. 형식: {"intent":"...","confidence":0.0~1.0}
-        설명, 추가 텍스트, 코드블록 없이 JSON만 반환하세요.`
-      const intentParams: any = {
-        model: CHAT_MODEL,
-        instructions: intentSystem,
-        input: sanitizedQuery,
-      }
-      const intentResp = await openai.responses.create(intentParams)
-      const rawIntentText = (intentResp as any).output_text ?? ''
-      console.log('🧭 인텐트 원문 응답:', rawIntentText)
-      const parsed = tryParseIntentJson(rawIntentText)
-      if (parsed?.intent) classifiedIntent = String(parsed.intent)
-      if (typeof parsed?.confidence === 'number') classifiedConfidence = parsed.confidence
-      if (!parsed) {
-        console.warn('⚠️ 인텐트 JSON 파싱 실패, 기본값 사용')
-      }
-    } catch (e) {
-      // 한글 주석: 1차 시도(json_schema) 실패 시, json_object 포맷으로 폴백 시도
-      console.warn('⚠️ 인텐트 분류 1차 실패:', formatOpenAIError(e))
-      try {
-        const fallbackSystem = oneLine`
-          당신은 한국어 법률 상담 도메인의 인텐트 분류기입니다. 사용자의 입력을 다음 중 하나로 분류하세요:
-          "greeting" | "legal_question" | "smalltalk" | "non_legal" | "other".
-          반드시 엄격한 JSON으로만 응답하세요. 형식: {"intent":"...","confidence":0.0~1.0}
-          설명, 추가 텍스트, 코드블록 없이 JSON만 반환하세요.`
-        const fbResp = await openai.responses.create({
-          model: CHAT_MODEL,
-          instructions: fallbackSystem,
-          input: sanitizedQuery,
-        })
-        const fbText = (fbResp as any).output_text ?? ''
-        console.log('🧭 인텐트 폴백 원문 응답:', fbText)
-        const fbParsed = tryParseIntentJson(fbText)
-        if (fbParsed?.intent) classifiedIntent = String(fbParsed.intent)
-        if (typeof fbParsed?.confidence === 'number') classifiedConfidence = fbParsed.confidence
-        if (!fbParsed) {
-          console.warn('⚠️ 인텐트 폴백 JSON 파싱 실패, 기본값 사용')
-        }
-      } catch (e2) {
-        console.warn('⚠️ 인텐트 분류 최종 실패, 기본값 사용:', formatOpenAIError(e2))
-      }
-    }
+    const { intent: classifiedIntent, confidence: classifiedConfidence } = await classifyIntentKorean(
+      sanitizedQuery
+    )
 
     // 인사/스몰톡/비법률 대응은 RAG 생략 후 즉시 응답
     if (classifiedIntent === 'greeting' || classifiedIntent === 'smalltalk') {
@@ -242,7 +109,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
           전문적 조언이나 확정적 단정은 피하고, 안전한 범위에서 설명하세요. 말투는 사용자 입력의 톤을 가볍게 반영하되 기본은 존댓말입니다.
           오직 간결한 답변 텍스트만 반환하세요.`
         const nlResp = await openai.responses.create({
-          model: CHAT_MODEL,
+          model: models.chat,
           instructions: nonLegalSystem,
           input: sanitizedQuery,
         })
@@ -269,7 +136,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     // Create embedding from query
     const embeddingResponse = await openai.embeddings.create({
-      model: EMBEDDING_MODEL,
+      model: models.embedding,
       input: sanitizedQuery.replaceAll('\n', ' '),
     })
 
@@ -280,87 +147,13 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     const [{ embedding }] = embeddingResponse.data
 
-    // Supabase RPC 호출
-
-    const { error: matchError, data: pageSections } = await supabaseClient.rpc(
-      'match_page_sections',
-      {
-        embedding,
-        match_threshold: 0.5, // 임계값을 낮춤 (0.78 → 0.5)
-        match_count: 10,
-        min_content_length: 30, // 최소 길이도 낮춤 (50 → 30)
-      }
-    )
-
-    if (matchError) {
-      throw new ApplicationError('Failed to match page sections', matchError)
-    }
-
-    // Vercel 환경에서 pageSections가 undefined일 수 있으므로 방어적 처리
+    const pageSections = await matchSectionsForQuery(embedding)
     if (!pageSections || !Array.isArray(pageSections)) {
       throw new ApplicationError('No matching page sections found')
     }
 
-    let tokenCount = 0
-    let contextText = ''
-    const usedSections: UsedSection[] = []
-
-    for (let i = 0; i < pageSections.length; i++) {
-      const pageSection = pageSections[i]
-      // 섹션 데이터 방어적 체크
-      if (!pageSection || !pageSection.content) {
-        continue
-      }
-
-      const content = pageSection.content
-      const sectionTokenCount = encodeTokens(content).length
-      
-      if (tokenCount + sectionTokenCount >= 1500) {
-        break
-      }
-
-      tokenCount += sectionTokenCount
-      contextText += `${content.trim()}\n---\n`
-      
-      // 사용된 섹션 메타데이터 저장
-      usedSections.push({
-        id: pageSection.id || i,
-        path: pageSection.path || 'unknown',
-        heading: pageSection.heading || '제목 없음',
-        similarity: pageSection.similarity || 0,
-        content_length: content.length,
-        token_count: sectionTokenCount,
-      })
-    }
-
-    // 안전한 템플릿 생성을 위한 변수들 확인
-    const safeContextText = contextText || ''
-    const safeSanitizedQuery = sanitizedQuery || ''
-
-    const prompt = codeBlock`
-      ${oneLine`
-        당신은 대한민국 법률 '정보'를 안내하는 따뜻하고 공감하는 상담사입니다. 아래 '법적 정보' 범위 내에서만 사실에 근거해,
-        쉬운 한국어와 존댓말로 답하세요. 문서에 없는 내용은 절대 추정하거나 만들어내지 않습니다.
-      `}
-
-      답변 원칙:
-      - 간결하게 답변하세요.
-      - 어려운 용어는 쉬운 표현으로 풀어 설명
-      - 전문 법률 자문이 필요한 지점은 명확히 표시하고, 변호사 상담을 권유
-      - 답변 마지막에 짧은 후속 질문 1개를 포함해 대화를 자연스럽게 이어가기
-      - 사용자가 원할 경우 변호사 상담 연결을 정중히 제안하고, 선호 연락 방법(전화/이메일)과 가능 시간을 물어보기
-      - 사용자 말투를 가볍게 반영하되, 기본은 존댓말로 공손하게 응답하기
-
-      법적 정보:
-      ${safeContextText}
-
-      질문: """
-      ${safeSanitizedQuery}
-      """
-
-      만약 제공된 법적 정보만으로 충분히 답하기 어렵다면 다음처럼 말하세요:
-      "제공된 정보로는 정확한 답변을 드리기 어렵습니다. 전문 변호사와 상담하시기를 권합니다."
-    `
+    const { contextText, usedSections } = buildContextFromSections(pageSections as any)
+    const prompt = buildKoreanLegalPrompt(contextText, sanitizedQuery)
 
     const chatMessage = {
       role: 'user' as const,
@@ -378,7 +171,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
       const stream = await openai.responses.create(
         {
-          model: CHAT_MODEL,
+          model: models.chat,
           input: prompt,
           stream: true,
         },
@@ -428,7 +221,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       }
     } else {
       const completion = await openai.responses.create({
-        model: CHAT_MODEL,
+        model: models.chat,
         input: prompt,
       })
 
