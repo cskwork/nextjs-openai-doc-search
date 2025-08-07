@@ -180,20 +180,45 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         '안녕하세요! 법무 상담 AI 어시스턴트입니다. 어떤 법적 문의를 도와드릴까요?\n',
         '- 예: 계약서 작성 시 주의사항은 무엇인가요?\n',
         '- 예: 직장에서 부당한 대우를 받았을 때 어떻게 해야 하나요?\n',
-        '- 예: 임대차 계약 만료 후 보증금 반환 절차가 궁금해요.',
+        '- 예: 임대차 계약 만료 후 보증금 반환 절차가 궁금해요.\n',
+        '\n필요하시다면 변호사 상담 연결도 도와드릴게요. 선호하시는 연락 방법(전화/이메일)과 가능하신 시간을 알려주실 수 있을까요?'
       ].join('\n')
       sendTextWithCitations(res, greetingAnswer, [], sanitizedQuery)
       return
     }
 
     if (classifiedIntent === 'non_legal' || classifiedIntent === 'other') {
-      const guidanceAnswer = [
-        '일반 대화는 가능하지만, 저는 법률 관련 상담에 최적화되어 있어요.\n',
-        '법적 이슈에 대해 구체적으로 질문해 주시면 관련 근거를 바탕으로 도와드릴게요.\n',
-        '- 예: 근로계약서에서 연장근로 수당 규정이 없다면 어떻게 되나요?\n',
-        '- 예: 전세계약 파기 시 위약금은 어떻게 계산되나요?',
-      ].join('\n')
-      sendTextWithCitations(res, guidanceAnswer, [], sanitizedQuery)
+      // 한글 주석: 비법률/기타 주제의 경우에도 간단한 일반 정보 응답을 제공하고 상담 연결로 부드럽게 유도
+      try {
+        const nonLegalSystem = oneLine`
+          당신은 따뜻하고 공감하는 한국어 상담사입니다. 법률 '외' 주제에 대해 사용자의 질문에 일반 정보 수준으로만 간단히(2~3문장) 답합니다.
+          전문적 조언이나 확정적 단정은 피하고, 안전한 범위에서 설명하세요. 말투는 사용자 입력의 톤을 가볍게 반영하되 기본은 존댓말입니다.
+          오직 간결한 답변 텍스트만 반환하세요.`
+        const nlResp = await openai.chat.completions.create({
+          model: CHAT_MODEL,
+          messages: [
+            { role: 'system', content: nonLegalSystem },
+            { role: 'user', content: sanitizedQuery },
+          ],
+        })
+        const shortAnswer = nlResp.choices?.[0]?.message?.content?.trim() ?? ''
+        const guidanceTail = [
+          '',
+          '혹시 법적 이슈로 이어질 수 있는 부분이 있다면, 변호사 상담 연결을 도와드릴 수 있어요.',
+          '상담을 원하시면 성함과 선호하시는 연락 방법(전화/이메일), 가능하신 시간을 알려주실 수 있을까요?',
+          '현재 상황을 한두 문장으로만 덧붙여 주시면 더 정확히 도와드릴게요.',
+        ].join('\n')
+        const finalAnswer = [shortAnswer, guidanceTail].join('\n')
+        sendTextWithCitations(res, finalAnswer, [], sanitizedQuery)
+      } catch (e) {
+        // 한글 주석: 실패 시에도 대화를 끊지 않고 안내 및 CTA 제공
+        const fallback = [
+          '간단히 답변을 준비하는 중 문제가 발생했어요. 그래도 걱정 마세요.',
+          '법적 이슈로 이어질 수 있는 부분이 있다면 변호사 상담 연결을 도와드릴 수 있어요.\n',
+          '상담을 원하시면 성함과 선호하시는 연락 방법(전화/이메일), 가능하신 시간을 알려주시겠어요?',
+        ].join('\n')
+        sendTextWithCitations(res, fallback, [], sanitizedQuery)
+      }
       return
     }
 
@@ -277,6 +302,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       - 간결하게 답변하세요.
       - 어려운 용어는 쉬운 표현으로 풀어 설명
       - 전문 법률 자문이 필요한 지점은 명확히 표시하고, 변호사 상담을 권유
+      - 답변 마지막에 짧은 후속 질문 1개를 포함해 대화를 자연스럽게 이어가기
+      - 사용자가 원할 경우 변호사 상담 연결을 정중히 제안하고, 선호 연락 방법(전화/이메일)과 가능 시간을 물어보기
+      - 사용자 말투를 가볍게 반영하되, 기본은 존댓말로 공손하게 응답하기
 
       법적 정보:
       ${safeContextText}
