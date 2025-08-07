@@ -22,6 +22,11 @@ export function SearchDialog() {
     api: '/api/vector-search',
   })
 
+  const handleModalToggle = React.useCallback(() => {
+    setOpen(!open)
+    setQuery('')
+  }, [open])
+
   React.useEffect(() => {
     const down = (e: KeyboardEvent) => {
       if (e.key === 'k' && e.metaKey) {
@@ -36,12 +41,7 @@ export function SearchDialog() {
 
     document.addEventListener('keydown', down)
     return () => document.removeEventListener('keydown', down)
-  }, [])
-
-  function handleModalToggle() {
-    setOpen(!open)
-    setQuery('')
-  }
+  }, [handleModalToggle])
 
   const handleSubmit: React.FormEventHandler<HTMLFormElement> = (e) => {
     e.preventDefault()
