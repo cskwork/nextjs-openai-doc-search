@@ -6,9 +6,17 @@ export function writePlainTextHeaders(res: NextApiResponse) {
   if (!res.headersSent) {
     res.writeHead(200, {
       'Content-Type': 'text/plain; charset=utf-8',
-      'Cache-Control': 'no-cache',
+      // 한글 주석: 스트리밍 버퍼링 방지 및 프록시 중간 변환 방지
+      'Cache-Control': 'no-cache, no-transform',
       Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no',
     })
+    // 가능한 한 빨리 헤더 전송
+    // @ts-ignore - 타입에 없을 수 있음
+    res.flushHeaders?.()
+    // Nagle 지연 비활성화로 소토큰 전송 지연 감소
+    // @ts-ignore - 타입에 없을 수 있음
+    res.socket?.setNoDelay?.(true)
   }
 }
 

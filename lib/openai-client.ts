@@ -8,7 +8,14 @@ export function getOpenAIClient(): OpenAI {
   if (openaiSingleton) return openaiSingleton
   const { openaiKey } = getConfig()
   // @ts-ignore - OpenAI v4 SDK default export is constructible
-  openaiSingleton = new OpenAI({ apiKey: openaiKey })
+  openaiSingleton = new OpenAI({
+    apiKey: openaiKey,
+    // 한글 주석: 지연을 줄이기 위해 타임아웃과 재시도 횟수를 보수적으로 설정
+    // 환경변수로 조정 가능 (기본: 30초, 1회 재시도 없음)
+    // OpenAI SDK v4 옵션: timeout(ms), maxRetries
+    timeout: Number(process.env.OPENAI_TIMEOUT_MS || 30000),
+    maxRetries: Number(process.env.OPENAI_MAX_RETRIES || 1),
+  })
   return openaiSingleton
 }
 
